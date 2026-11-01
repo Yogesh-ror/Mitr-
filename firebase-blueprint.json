@@ -1,0 +1,388 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Publicly discoverable user profile information.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID" },
+        "username": { "type": "string", "description": "Unique lowercase handle" },
+        "displayName": { "type": "string", "description": "User display name" },
+        "bio": { "type": "string", "description": "Profile biography" },
+        "website": { "type": "string", "description": "Optional website link" },
+        "avatarUrl": { "type": "string", "description": "Profile avatar URL or URI" },
+        "isPrivate": { "type": "boolean", "description": "Whether account requires follow approval" },
+        "postCount": { "type": "integer", "description": "Total published posts" },
+        "followerCount": { "type": "integer", "description": "Total followers" },
+        "followingCount": { "type": "integer", "description": "Total following" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["userId", "username", "displayName", "isPrivate", "postCount", "followerCount", "followingCount", "createdAt", "updatedAt"]
+    },
+    "UsernameClaim": {
+      "title": "UsernameClaim",
+      "description": "Enforces global username uniqueness.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner UID" },
+        "username": { "type": "string", "description": "Claimed username" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["userId", "username", "createdAt"]
+    },
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "Strictly private user account, privacy, notification, and time management settings.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "email": { "type": "string" },
+        "isPrivateAccount": { "type": "boolean" },
+        "requireFollowApproval": { "type": "boolean" },
+        "whoCanComment": { "type": "string", "enum": ["EVERYONE", "FOLLOWERS", "NO_ONE"] },
+        "whoCanMessage": { "type": "string", "enum": ["EVERYONE", "FOLLOWERS", "NO_ONE"] },
+        "whoCanTag": { "type": "string", "enum": ["EVERYONE", "FOLLOWERS", "NO_ONE"] },
+        "whoCanMention": { "type": "string", "enum": ["EVERYONE", "FOLLOWERS", "NO_ONE"] },
+        "whoCanReplyStories": { "type": "string", "enum": ["EVERYONE", "FOLLOWERS", "OFF"] },
+        "manuallyApproveTags": { "type": "boolean" },
+        "showActivityStatus": { "type": "boolean" },
+        "readReceiptsEnabled": { "type": "boolean" },
+        "hideLikeCounts": { "type": "boolean" },
+        "allowStorySharing": { "type": "boolean" },
+        "archiveStories": { "type": "boolean" },
+        "hiddenWordsCsv": { "type": "string" },
+        "sensitiveContentControl": { "type": "string", "enum": ["STANDARD", "LESS", "MORE"] },
+        "searchDiscoverability": { "type": "boolean" },
+        "pushNotificationsEnabled": { "type": "boolean" },
+        "notifyLikes": { "type": "boolean" },
+        "notifyComments": { "type": "boolean" },
+        "notifyCommentReplies": { "type": "boolean" },
+        "notifyFollowers": { "type": "boolean" },
+        "notifyFollowRequests": { "type": "boolean" },
+        "notifyMentions": { "type": "boolean" },
+        "notifyDirectMessages": { "type": "boolean" },
+        "notifyMessageRequests": { "type": "boolean" },
+        "notifyStoryReplies": { "type": "boolean" },
+        "notifyLiveVideos": { "type": "boolean" },
+        "notifyReminders": { "type": "boolean" },
+        "emailNotificationsEnabled": { "type": "boolean" },
+        "quietHoursEnabled": { "type": "boolean" },
+        "quietHoursStart": { "type": "string" },
+        "quietHoursEnd": { "type": "string" },
+        "dailyTimeLimitMinutes": { "type": "integer" },
+        "breakReminderMinutes": { "type": "integer" },
+        "bedtimeReminderEnabled": { "type": "boolean" },
+        "bedtimeStart": { "type": "string" },
+        "todayUsageMinutes": { "type": "integer" },
+        "weeklyUsageMinutes": { "type": "integer" },
+        "locationAccessEnabled": { "type": "boolean" },
+        "allowPostLocation": { "type": "boolean" },
+        "showLocationContent": { "type": "boolean" },
+        "themeMode": { "type": "string", "enum": ["SYSTEM", "LIGHT", "DARK"] },
+        "dataSaverMode": { "type": "boolean" },
+        "autoplayVideos": { "type": "boolean" },
+        "highQualityVideo": { "type": "boolean" },
+        "reduceMotion": { "type": "boolean" },
+        "autoCaptions": { "type": "boolean" },
+        "textScalePercent": { "type": "integer" },
+        "accountDeactivated": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "isPrivateAccount", "updatedAt"]
+    },
+    "Post": {
+      "title": "Post",
+      "description": "User-published image, video, or carousel post with optional trimmed music track.",
+      "type": "object",
+      "properties": {
+        "authorId": { "type": "string" },
+        "authorUsername": { "type": "string" },
+        "authorDisplayName": { "type": "string" },
+        "authorAvatarUrl": { "type": "string" },
+        "caption": { "type": "string" },
+        "mediaUrls": { "type": "array" },
+        "mediaType": { "type": "string", "enum": ["IMAGE", "VIDEO", "CAROUSEL"] },
+        "locationTag": { "type": "string" },
+        "taggedUsernames": { "type": "array" },
+        "hashtags": { "type": "array" },
+        "visibility": { "type": "string", "enum": ["PUBLIC", "FOLLOWERS", "CLOSE_FRIENDS"] },
+        "commentsAllowed": { "type": "boolean" },
+        "likeCount": { "type": "integer" },
+        "commentCount": { "type": "integer" },
+        "likedByUids": { "type": "array" },
+        "musicTrackId": { "type": "string" },
+        "musicTitle": { "type": "string" },
+        "musicArtist": { "type": "string" },
+        "musicCoverUrl": { "type": "string" },
+        "musicUrl": { "type": "string" },
+        "musicStartMs": { "type": "integer" },
+        "musicEndMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["authorId", "authorUsername", "authorDisplayName", "caption", "mediaUrls", "mediaType", "visibility", "commentsAllowed", "likeCount", "commentCount", "createdAt", "updatedAt"]
+    },
+    "Comment": {
+      "title": "Comment",
+      "description": "Comment or reply on a post or reel.",
+      "type": "object",
+      "properties": {
+        "targetId": { "type": "string" },
+        "targetType": { "type": "string", "enum": ["POST", "REEL"] },
+        "authorId": { "type": "string" },
+        "authorUsername": { "type": "string" },
+        "authorDisplayName": { "type": "string" },
+        "text": { "type": "string" },
+        "parentCommentId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["targetId", "targetType", "authorId", "authorUsername", "authorDisplayName", "text", "createdAt"]
+    },
+    "Story": {
+      "title": "Story",
+      "description": "24-hour ephemeral or close-friends story with optional trimmed music track.",
+      "type": "object",
+      "properties": {
+        "authorId": { "type": "string" },
+        "authorUsername": { "type": "string" },
+        "authorDisplayName": { "type": "string" },
+        "mediaUrl": { "type": "string" },
+        "mediaType": { "type": "string", "enum": ["IMAGE", "VIDEO"] },
+        "caption": { "type": "string" },
+        "overlayText": { "type": "string" },
+        "stickerLabel": { "type": "string" },
+        "audience": { "type": "string", "enum": ["PUBLIC", "CLOSE_FRIENDS"] },
+        "allowedViewerIds": { "type": "array" },
+        "viewerIds": { "type": "array" },
+        "musicTrackId": { "type": "string" },
+        "musicTitle": { "type": "string" },
+        "musicArtist": { "type": "string" },
+        "musicCoverUrl": { "type": "string" },
+        "musicUrl": { "type": "string" },
+        "musicStartMs": { "type": "integer" },
+        "musicEndMs": { "type": "integer" },
+        "isHighlighted": { "type": "boolean" },
+        "highlightTitle": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "expiresAtMillis": { "type": "integer" }
+      },
+      "required": ["authorId", "authorUsername", "authorDisplayName", "mediaUrl", "mediaType", "caption", "audience", "allowedViewerIds", "viewerIds", "createdAt", "expiresAtMillis"]
+    },
+    "Reel": {
+      "title": "Reel",
+      "description": "Short-form vertical video post with trimmed audio track.",
+      "type": "object",
+      "properties": {
+        "authorId": { "type": "string" },
+        "authorUsername": { "type": "string" },
+        "authorDisplayName": { "type": "string" },
+        "videoUrl": { "type": "string" },
+        "caption": { "type": "string" },
+        "audioTrackName": { "type": "string" },
+        "durationSeconds": { "type": "integer" },
+        "visibility": { "type": "string", "enum": ["PUBLIC", "FOLLOWERS"] },
+        "likeCount": { "type": "integer" },
+        "commentCount": { "type": "integer" },
+        "viewCount": { "type": "integer" },
+        "likedByUids": { "type": "array" },
+        "musicTrackId": { "type": "string" },
+        "musicTitle": { "type": "string" },
+        "musicArtist": { "type": "string" },
+        "musicCoverUrl": { "type": "string" },
+        "musicUrl": { "type": "string" },
+        "musicStartMs": { "type": "integer" },
+        "musicEndMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["authorId", "authorUsername", "authorDisplayName", "videoUrl", "caption", "audioTrackName", "durationSeconds", "visibility", "likeCount", "commentCount", "viewCount", "createdAt", "updatedAt"]
+    },
+    "Follow": {
+      "title": "Follow",
+      "description": "Follow relationship or pending follow request.",
+      "type": "object",
+      "properties": {
+        "followerId": { "type": "string" },
+        "followerUsername": { "type": "string" },
+        "followingId": { "type": "string" },
+        "followingUsername": { "type": "string" },
+        "status": { "type": "string", "enum": ["ACCEPTED", "PENDING"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["followerId", "followerUsername", "followingId", "followingUsername", "status", "createdAt"]
+    },
+    "SavedPost": {
+      "title": "SavedPost",
+      "description": "Private bookmark of a post or reel owned by a user.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "postId": { "type": "string" },
+        "targetType": { "type": "string", "enum": ["POST", "REEL"] },
+        "authorUsername": { "type": "string" },
+        "captionPreview": { "type": "string" },
+        "mediaUrl": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "postId", "targetType", "authorUsername", "captionPreview", "createdAt"]
+    },
+    "SavedMusic": {
+      "title": "SavedMusic",
+      "description": "Private saved song/audio track owned by a user.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "trackId": { "type": "string" },
+        "title": { "type": "string" },
+        "artist": { "type": "string" },
+        "coverUrl": { "type": "string" },
+        "audioUrl": { "type": "string" },
+        "durationMs": { "type": "integer" },
+        "trimStartMs": { "type": "integer" },
+        "trimEndMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "trackId", "title", "artist", "durationMs", "trimStartMs", "trimEndMs", "createdAt"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "Direct messaging thread between participants.",
+      "type": "object",
+      "properties": {
+        "participantIds": { "type": "array" },
+        "participantUsernames": { "type": "array" },
+        "initiatorId": { "type": "string" },
+        "lastMessageText": { "type": "string" },
+        "lastSenderId": { "type": "string" },
+        "status": { "type": "string", "enum": ["ACTIVE", "REQUESTED", "DECLINED"] },
+        "mutedByUids": { "type": "array" },
+        "unreadCount": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["participantIds", "participantUsernames", "initiatorId", "lastMessageText", "lastSenderId", "status", "unreadCount", "createdAt", "updatedAt"]
+    },
+    "DirectMessage": {
+      "title": "DirectMessage",
+      "description": "Individual message inside a conversation with denormalized participantIds.",
+      "type": "object",
+      "properties": {
+        "conversationId": { "type": "string" },
+        "participantIds": { "type": "array" },
+        "senderId": { "type": "string" },
+        "senderUsername": { "type": "string" },
+        "text": { "type": "string" },
+        "mediaUrl": { "type": "string" },
+        "mediaType": { "type": "string", "enum": ["NONE", "IMAGE", "VIDEO"] },
+        "replyToMessageId": { "type": "string" },
+        "deliveryStatus": { "type": "string", "enum": ["SENT", "DELIVERED", "READ"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["conversationId", "participantIds", "senderId", "senderUsername", "text", "mediaType", "deliveryStatus", "createdAt"]
+    },
+    "UserRelation": {
+      "title": "UserRelation",
+      "description": "Owner-scoped relation for Close Friends, Blocked, Restricted, or Muted users.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string" },
+        "targetUserId": { "type": "string" },
+        "targetUsername": { "type": "string" },
+        "targetDisplayName": { "type": "string" },
+        "relationType": { "type": "string", "enum": ["CLOSE_FRIEND", "BLOCKED", "RESTRICTED", "MUTED_STORIES"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "targetUserId", "targetUsername", "targetDisplayName", "relationType", "createdAt"]
+    },
+    "UserActivityLog": {
+      "title": "UserActivityLog",
+      "description": "User's private activity history and search history.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "activityType": { "type": "string", "enum": ["LIKE", "COMMENT", "REPLY", "FOLLOW", "SEARCH", "STORY_REPLY", "POST_CREATED", "REEL_CREATED"] },
+        "targetId": { "type": "string" },
+        "summary": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "activityType", "targetId", "summary", "createdAt"]
+    },
+    "ContentReport": {
+      "title": "ContentReport",
+      "description": "User-submitted moderation report.",
+      "type": "object",
+      "properties": {
+        "reporterId": { "type": "string" },
+        "targetId": { "type": "string" },
+        "targetType": { "type": "string", "enum": ["POST", "REEL", "STORY", "USER", "MESSAGE"] },
+        "reason": { "type": "string" },
+        "status": { "type": "string", "enum": ["OPEN", "REVIEWED"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["reporterId", "targetId", "targetType", "reason", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Public user profiles indexed by Firebase UID."
+    },
+    "/usernames/{username}": {
+      "schema": { "$ref": "#/entities/UsernameClaim" },
+      "description": "Unique username registry mapping lowercase username to owner UID."
+    },
+    "/user_settings/{userId}": {
+      "schema": { "$ref": "#/entities/UserSettings" },
+      "description": "Private user settings, notifications, privacy, and time management."
+    },
+    "/posts/{postId}": {
+      "schema": { "$ref": "#/entities/Post" },
+      "description": "Feed posts (image, video, carousel) with optional trimmed music."
+    },
+    "/comments/{commentId}": {
+      "schema": { "$ref": "#/entities/Comment" },
+      "description": "Comments and replies on posts and reels."
+    },
+    "/stories/{storyId}": {
+      "schema": { "$ref": "#/entities/Story" },
+      "description": "Ephemeral 24h stories with public or close-friends audience and optional trimmed music."
+    },
+    "/reels/{reelId}": {
+      "schema": { "$ref": "#/entities/Reel" },
+      "description": "Vertical short-video reels with trimmed audio."
+    },
+    "/follows/{followId}": {
+      "schema": { "$ref": "#/entities/Follow" },
+      "description": "Follow relationships and follow requests."
+    },
+    "/saved_posts/{savedId}": {
+      "schema": { "$ref": "#/entities/SavedPost" },
+      "description": "Private saved posts and reels per user."
+    },
+    "/saved_music/{savedId}": {
+      "schema": { "$ref": "#/entities/SavedMusic" },
+      "description": "Private saved music tracks per user."
+    },
+    "/conversations/{conversationId}": {
+      "schema": { "$ref": "#/entities/Conversation" },
+      "description": "Direct messaging conversations and message requests."
+    },
+    "/conversations/{conversationId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/DirectMessage" },
+      "description": "Real-time messages inside a conversation."
+    },
+    "/user_relations/{relationId}": {
+      "schema": { "$ref": "#/entities/UserRelation" },
+      "description": "Close friends, blocked accounts, restricted accounts, and muted story accounts."
+    },
+    "/user_activity/{activityId}": {
+      "schema": { "$ref": "#/entities/UserActivityLog" },
+      "description": "Real user activity log and search history."
+    },
+    "/reports/{reportId}": {
+      "schema": { "$ref": "#/entities/ContentReport" },
+      "description": "Content and account moderation reports."
+    }
+  }
+}

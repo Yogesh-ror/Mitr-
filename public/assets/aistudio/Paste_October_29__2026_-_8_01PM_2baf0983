@@ -1,0 +1,744 @@
+PROJECT: Build a Complete, Production-Ready Social Media Android App
+
+Act as a senior Android developer, UI/UX designer, backend engineer, database architect, and security engineer. Build a complete, modern, feature-rich social media Android application with a premium user experience, smooth animations, responsive layouts, and fully functional features.
+
+The app must be an original social networking platform with its own identity, design system, and branding. Do not mention or use any existing social media application's name, logo, proprietary assets, or branding anywhere in the project.
+
+IMPORTANT: Build a real, working application, not just a prototype, mockup, static UI, or collection of screens.
+
+1. Technology Stack and Architecture
+
+Use the following technologies where supported by the environment:
+
+Platform: Native Android application.
+Language: Kotlin.
+UI: Jetpack Compose with Material 3.
+Architecture: Clean Architecture with MVVM, repositories, and dependency injection.
+Authentication: Firebase Authentication or an equivalent secure authentication provider.
+Database: Cloud Firestore or a suitable scalable backend database.
+Media storage: Firebase Storage or equivalent cloud object storage.
+Push notifications: Firebase Cloud Messaging.
+Backend logic: Secure server-side functions for sensitive operations.
+Video playback: A suitable Android media playback library.
+Image loading: An efficient image-loading library.
+Navigation: Type-safe navigation with persistent state where appropriate.
+
+If the environment cannot create a native Android project directly, generate a complete, runnable Android-compatible implementation and provide clear instructions for exporting, building, and running it in Android Studio.
+
+Keep the code modular, maintainable, scalable, testable, and ready for further development.
+
+2. Strict No-Hardcoded-Data Requirement
+
+This is one of the most important requirements.
+
+Do not use hardcoded or fake application data anywhere in the actual app.
+
+Never populate the production interface with:
+
+Fake user accounts or profiles.
+Sample posts, stories, reels, or comments.
+Fake follower or following counts.
+Hardcoded chat conversations or messages.
+Fake notifications or activity history.
+Fixed usernames, profile photos, or online statuses.
+Mock search results or fabricated trending content.
+Hardcoded authentication credentials.
+Artificial engagement counts, likes, or views.
+Placeholder content presented as real user-generated content.
+
+All application data must come from a real backend, authenticated user sessions, or actual user input.
+
+For example:
+
+Display posts from the backend based on the current user's feed and permissions.
+Display profile details from the database.
+Save likes and comments to the backend.
+Load messages from persistent conversation records.
+Retrieve notification settings from the current user's account.
+Load stories and reels from uploaded media records.
+Fetch search results from real indexed user and content records.
+
+Use environment configuration and secure secret management for service credentials. Never expose private server credentials in the Android application.
+
+Create an empty state for every screen that has no data. Examples include "No posts yet", "No messages yet", "No notifications yet", and "No search results".
+
+During development, use an empty database or clearly isolated test fixtures only in automated tests. Never allow test data to appear in the production user experience.
+
+If backend credentials are missing, explain what must be configured and display a useful setup state. Do not silently replace missing backend data with fabricated content.
+
+3. Authentication and Account Management
+
+Implement complete authentication flows:
+
+Sign up using email and password.
+Log in using email and password.
+Email verification.
+Forgot password and password reset.
+Secure logout.
+Session persistence.
+Account deletion.
+Password change.
+Optional Google sign-in if properly configured.
+Appropriate loading, validation, success, and error states.
+Secure handling of expired sessions.
+Protection against unauthorized access to another user's account.
+Clear privacy and terms links.
+
+Create a proper onboarding flow for new users, including choosing a unique username, display name, profile photo, and optional bio.
+
+Check username availability through the backend and enforce uniqueness using appropriate server-side validation.
+
+4. Main Application Navigation
+
+Create a clean bottom navigation bar with exactly four primary navigation options:
+
+Home — The main feed containing posts and stories.
+Reels — A full-screen vertical short-video feed.
+Messages — Direct messages and conversations.
+Search — Search for users and discover content.
+
+Place the current user's circular profile avatar at the far-right side of the main app navigation area, alongside the four primary options.
+
+The profile avatar must open the user's profile screen.
+
+Ensure the navigation works correctly, preserves state when switching tabs where appropriate, and provides smooth transitions.
+
+On smaller devices, use responsive spacing and appropriately sized touch targets without clipping the navigation items.
+
+5. Home Feed and Stories
+
+Build a dynamic home feed that loads real content from the backend.
+
+Home feed features
+Display posts from followed accounts and other eligible content sources.
+Support image posts, video posts, and carousel posts.
+Like and unlike posts.
+Comment on posts.
+Reply to comments.
+Share posts.
+Save and unsave posts.
+Open the author's profile.
+Follow and unfollow users.
+Report inappropriate content.
+Access post-specific options through a menu.
+Support pagination or cursor-based infinite scrolling.
+Provide pull-to-refresh.
+Display loading skeletons, errors, and empty states.
+Update engagement counts consistently after successful server operations.
+Stories
+
+Implement a complete story system:
+
+Upload image and video stories.
+View stories in a full-screen viewer.
+Show story progress indicators.
+Automatically advance through story segments.
+Pause stories when the user holds the screen.
+Navigate between story segments and different accounts.
+Record story views with appropriate privacy controls.
+Show a user's own story and viewer list where permitted.
+Delete a user's own story.
+Support story replies and reactions.
+Share selected posts to stories where supported.
+Add story captions, stickers, and text overlays where practical.
+Support close-friends-only stories.
+Allow users to mute stories from selected accounts.
+Expire ordinary stories after 24 hours, enforced using trusted server time.
+Respect blocked accounts and story visibility settings.
+
+Do not show stories that the current user is not authorized to see.
+
+6. Posts and Media Publishing
+
+Create a complete post creation and publishing workflow.
+
+Users must be able to:
+
+Select images and videos from their device.
+Capture media using supported Android camera features.
+Preview selected media.
+Crop, rotate, or adjust images where practical.
+Add captions.
+Add optional location tags with explicit permission.
+Tag and mention other users.
+Select an audience where supported.
+Publish posts.
+Edit captions and permitted post details.
+Delete their own posts.
+View their published posts on their profile.
+Save posts privately.
+Share posts through supported in-app actions.
+Report posts.
+Control comments and other available interactions through privacy settings.
+
+Use Android's system photo picker where appropriate. Request camera, microphone, and location permissions only when necessary and explain their purpose.
+
+Upload media to cloud storage and store the corresponding metadata in the database. Validate file types and sizes, handle upload failures, and support upload progress and retry behavior.
+
+7. Reels and Short-Video Experience
+
+Build a dedicated, immersive short-video viewing and publishing experience.
+
+Required features:
+
+Full-screen vertical video playback.
+Smooth swipe-based navigation between videos.
+Automatic playback of the active video.
+Pause and resume controls.
+Mute and unmute.
+Like and unlike.
+Comment and reply.
+Share.
+Save.
+Follow the creator.
+View the creator's profile.
+Display captions and permitted engagement information.
+Upload and publish short videos.
+Add captions and mentions.
+Support video trimming where practical.
+Record views and engagement through the backend.
+Load more videos using pagination.
+Handle unavailable or deleted videos gracefully.
+Provide report and content moderation options.
+
+Optimize playback, caching, memory usage, and scrolling performance for Android devices.
+
+Do not create a fake algorithm or populate the feed with sample videos. Build a real feed query based on available content, user relationships, visibility rules, and actual engagement signals.
+
+8. Direct Messaging
+
+Implement a real-time messaging system with persistent conversations.
+
+Features must include:
+
+One-to-one messaging.
+Conversation list.
+Start a conversation from a user's profile.
+Text messages.
+Image and video attachments.
+Message timestamps.
+Delivery and read states where supported.
+Unread message counts.
+Real-time message updates.
+Message replies.
+Message deletion with clearly defined behavior.
+Message requests from non-followed accounts.
+Accept, decline, and restrict message requests.
+Conversation mute settings.
+Block and report actions.
+Typing indicators and online status only when supported and permitted by privacy settings.
+Search within conversations where practical.
+Notifications for new messages.
+Safe handling of media attachments and upload failures.
+
+Enforce conversation membership on the server. Users must never be able to read or modify conversations they do not belong to.
+
+Do not store sensitive message content in public database documents. Use appropriate database rules, transport security, and secure storage practices.
+
+Do not claim end-to-end encryption unless a complete, reviewed end-to-end encryption implementation is actually included.
+
+9. Search and Discovery
+
+Build a functional search screen.
+
+Users should be able to search for:
+
+Usernames.
+Display names.
+Accounts.
+Posts.
+Captions and hashtags.
+Publicly discoverable reels.
+
+Include recent searches, clear-search functionality, loading states, empty states, and useful error handling.
+
+Provide a discovery feed based on actual available content and permitted ranking signals.
+
+Do not display fabricated trending topics, imaginary users, or mock search results.
+
+Apply privacy restrictions and blocking rules to search results.
+
+10. Complete User Profile System
+
+Create a profile screen with:
+
+Profile photo.
+Display name.
+Unique username.
+Bio.
+Optional website.
+Post count.
+Follower count.
+Following count.
+Follow and unfollow buttons.
+Message button when permitted.
+Profile tabs for posts, reels, and other supported content.
+Saved posts visible only to the account owner.
+Tagged posts subject to privacy settings.
+A profile options menu.
+Edit profile
+
+Allow users to edit:
+
+Profile picture.
+Display name.
+Username.
+Bio.
+Website.
+Optional personal details supported by the product.
+
+Save all changes to the backend and reflect successful updates throughout the app.
+
+Validate inputs and handle username conflicts.
+
+Multiple profile and account switching
+
+Allow users to add and manage multiple accounts and switch between them without repeatedly entering credentials when their sessions remain valid.
+
+Include:
+
+Add an existing account.
+Create a new account.
+Switch between authenticated accounts.
+Display the active account clearly.
+Maintain separate profiles, feeds, messages, settings, and sessions.
+Log out of an individual account.
+Remove an account from the local account switcher.
+Log out of all accounts when requested.
+
+Switching accounts must update the active authentication context and all account-specific data. Never combine data belonging to different accounts.
+
+11. Comprehensive Settings Center
+
+Create a dedicated settings screen accessible from the profile menu.
+
+Use organized sections, clear descriptions, toggles, selection controls, confirmation dialogs, and subpages. Every implemented setting must persist to the backend or secure local storage according to its purpose.
+
+A. Account settings
+Personal information.
+Username and profile details.
+Password and security.
+Login session management.
+Connected sign-in providers where supported.
+Account privacy.
+Download personal data where supported.
+Deactivate account.
+Permanently delete account.
+Log out.
+Log out of all sessions.
+B. Your activity
+
+Create a real activity dashboard showing the current user's actual activity.
+
+Include:
+
+Posts liked by the user.
+Comments made by the user.
+Replies made by the user.
+Posts and reels the user has interacted with.
+Recent account activity.
+Search history.
+Recently deleted content where supported.
+Content and interactions filtered by date.
+
+Allow users to filter activity, remove supported activity records, and navigate back to the relevant post or content when it still exists and the user has permission to access it.
+
+Never generate artificial activity history.
+
+C. Notifications
+
+Provide individual controls for:
+
+Likes.
+Comments.
+Comment replies.
+New followers.
+Follow requests.
+Mentions and tags.
+Direct messages.
+Message requests.
+Story replies and reactions.
+Live-video notifications.
+Reminders.
+Email notifications, if supported.
+Push notifications.
+Quiet hours and notification preferences.
+
+Store notification preferences and enforce them in the notification delivery pipeline wherever applicable.
+
+Explain when a setting controls device notifications versus server-generated notifications.
+
+D. Time management
+
+Create a time-management dashboard with:
+
+Daily time spent in the app.
+Weekly usage summary.
+Daily time limits.
+Custom reminders to take breaks.
+Quiet hours.
+Notification pause schedules.
+Optional bedtime reminders.
+
+Calculate usage from actual, appropriately recorded session data. Do not invent usage statistics.
+
+Explain the limitations of usage tracking when the app is not running or the user is using another device.
+
+E. Privacy
+
+Include:
+
+Public or private account.
+Follow request approval.
+Who can see posts.
+Who can mention the user.
+Who can tag the user.
+Who can reply to stories.
+Who can send message requests.
+Who can comment on posts.
+Activity status visibility.
+Read receipt controls where supported.
+Story visibility.
+Close Friends list.
+Muted accounts.
+Blocked accounts.
+Restricted accounts.
+Hidden words and comment filters.
+Sensitive-content preferences where applicable.
+Search and discoverability preferences.
+
+Apply the actual selected privacy rules to backend queries and server-side authorization. Hiding a button in the UI is not sufficient to enforce privacy.
+
+F. Close Friends
+
+Create a dedicated Close Friends manager.
+
+Search for accounts.
+Add or remove accounts.
+Display the current list.
+Save changes.
+Use the list to determine who can view close-friends-only stories.
+Enforce eligibility on the server.
+Prevent unauthorized users from retrieving restricted story media.
+G. Blocked and restricted accounts
+
+Create a blocked accounts page with:
+
+List of blocked users.
+Unblock action with confirmation.
+Access to a blocked user's profile only where appropriate.
+
+Create a restricted accounts page with:
+
+List of restricted accounts.
+Restrict and unrestrict actions.
+Appropriate comment and messaging limitations.
+
+Ensure block actions apply consistently to profiles, feeds, search, stories, comments, and messages. Define how existing follows and conversations are handled.
+
+H. Stories and live content
+
+Include settings for:
+
+Hide stories from selected people.
+Story reply permissions.
+Story sharing permissions.
+Close-friends visibility.
+Story mention permissions.
+Story archive preferences where supported.
+Live-video notifications.
+Live interaction and audience controls where supported.
+
+If live video broadcasting is included, implement actual streaming infrastructure or a supported streaming integration. Otherwise, label the feature as not yet available rather than displaying a fake live experience.
+
+I. Messages and story replies
+
+Include:
+
+Who can message the user.
+Message request permissions.
+Group invitation controls where applicable.
+Read receipts.
+Activity indicators.
+Story reply permissions.
+Message notification preferences.
+Muted conversations.
+Blocked senders.
+Message request filtering.
+J. Tags and mentions
+
+Include:
+
+Who can tag the user.
+Who can mention the user.
+Manually approve tagged posts.
+Review pending tags.
+Remove tags from content.
+Mention notification preferences.
+Control visibility of tagged content on the profile.
+K. Location settings
+
+Include:
+
+Enable or disable location access within the app.
+Explain Android device-level location permissions.
+Allow or disallow adding a location to posts.
+Allow or disallow displaying location-related content.
+Review and remove saved location metadata where supported.
+Never share precise location without explicit user action and permission.
+
+Do not collect or retain background location data unless it is genuinely necessary, explicitly disclosed, and permitted.
+
+L. Content and accessibility settings
+
+Include:
+
+Language selection where translations are available.
+Dark mode, light mode, and system theme.
+Data-saving mode.
+Autoplay preferences.
+Video quality preferences where supported.
+Reduced animation preferences where practical.
+Caption preferences.
+Accessibility-friendly text scaling.
+Content filtering options.
+M. Security and support
+
+Include:
+
+Active sessions and devices.
+Log out of selected sessions where supported.
+Security alerts.
+Password reset.
+Report a problem.
+Help center.
+Community guidelines.
+Privacy policy.
+Terms of service.
+About the application.
+App version.
+Delete account and personal data.
+
+Do not show security features as functional unless the relevant backend support exists.
+
+12. Backend Database Design
+
+Create a documented and scalable database structure for entities such as:
+
+users
+userProfiles
+accountSettings
+notificationPreferences
+privacySettings
+userSessions
+follows
+followRequests
+posts
+postMedia
+comments
+commentReplies
+likes
+savedPosts
+stories
+storyViews
+storyReplies
+closeFriends
+reels
+reelViews
+conversations
+conversationMembers
+messages
+messageRequests
+notifications
+userActivity
+blockedUsers
+restrictedUsers
+mutedUsers
+hashtags
+reports
+moderationActions
+userTags
+searchHistory
+usageSessions
+
+Adapt the final schema to the selected database instead of blindly creating unnecessary collections.
+
+Use unique identifiers, timestamps, appropriate indexes, pagination, and database transactions or atomic operations where necessary.
+
+Avoid unbounded documents and inefficient read patterns.
+
+Use server-generated timestamps for security-sensitive events and enforce referential consistency where needed.
+
+Document relationships between entities, expected indexes, access patterns, retention policies, and data deletion behavior.
+
+13. Security and Privacy Requirements
+
+Implement:
+
+Authentication checks for protected operations.
+Server-side authorization.
+Least-privilege database rules.
+Secure storage access policies.
+File upload validation.
+Input validation and output encoding.
+Rate limiting for abuse-prone operations.
+Protection against duplicate likes, follows, and repeated actions.
+Server-side validation of usernames and permissions.
+Safe account deletion and data cleanup.
+Protection against unauthorized media access.
+Privacy-aware push notifications.
+Secure error handling.
+Appropriate logging without exposing passwords, access tokens, or sensitive private data.
+
+Never trust a client-supplied user ID to authorize an operation. Derive the acting identity from the authenticated session and verify permissions on the server.
+
+Do not embed service-account credentials or administrative keys in the Android app.
+
+Use database security rules and automated tests to verify that one user cannot access another user's private data.
+
+14. UI/UX and Visual Design
+
+Create an original, polished, premium social media interface.
+
+Design direction:
+
+Clean and minimal.
+Modern typography.
+Consistent spacing and layout.
+Smooth transitions.
+Rounded cards and controls where appropriate.
+High-quality image and video presentation.
+Attractive dark and light themes.
+Accessible colors and contrast.
+Clear icons with labels where useful.
+Subtle animations that do not hurt performance.
+Consistent loading, error, and empty states.
+
+Create all major screens:
+
+Splash screen.
+Onboarding.
+Sign-up screen.
+Login screen.
+Password reset.
+Home feed.
+Story viewer.
+Post creation.
+Post details and comments.
+Reels feed.
+Reel upload and editing.
+Search and discovery.
+Messages inbox.
+Individual chat.
+Message requests.
+User profile.
+Edit profile.
+Account switcher.
+Settings dashboard.
+Your activity.
+Notification settings.
+Time management.
+Privacy settings.
+Close Friends manager.
+Blocked and restricted accounts.
+Story and message controls.
+Tag and mention controls.
+Location settings.
+Security settings.
+Help and support.
+Report content.
+Account deletion flow.
+
+Do not create screens that are only decorative. Every visible control must perform its intended action, navigate to a working destination, or clearly indicate that the feature requires configuration or is not yet implemented.
+
+15. Performance and Reliability
+Use pagination for large feeds.
+Optimize image loading and caching.
+Recycle or lazily render large lists.
+Avoid unnecessary recompositions.
+Handle offline and poor-network conditions gracefully.
+Prevent duplicate submissions.
+Show upload and loading progress.
+Retry transient failures safely.
+Handle expired authentication sessions.
+Preserve drafts when appropriate.
+Prevent memory leaks.
+Handle video playback lifecycle correctly.
+Avoid excessive database reads and writes.
+Support different Android screen sizes.
+Follow Android lifecycle and permission best practices.
+16. Testing Requirements
+
+Write meaningful automated tests for:
+
+Authentication.
+Account switching.
+Post creation.
+Likes and comments.
+Follow requests.
+Story visibility.
+Close Friends restrictions.
+Message access control.
+Blocked account behavior.
+Privacy settings.
+Notification preferences.
+Account deletion.
+Database security rules.
+Backend authorization.
+Empty and error states.
+
+Include unit tests, UI tests, and backend security tests where supported.
+
+Do not claim that tests passed unless they have actually been executed successfully.
+
+17. Development Workflow and Deliverables
+
+Follow this implementation sequence:
+
+Phase 1: Inspect the development environment and establish the project structure, dependencies, configuration, and design system.
+
+Phase 2: Configure the real backend, authentication, database, storage, and security rules.
+
+Phase 3: Implement authentication, onboarding, profile creation, and account switching.
+
+Phase 4: Implement the four main navigation destinations, profile screen, posts, stories, and media uploads.
+
+Phase 5: Implement reels, search, follows, likes, comments, and saved posts.
+
+Phase 6: Implement direct messaging, message requests, and push notifications.
+
+Phase 7: Implement the full settings center, privacy enforcement, activity dashboard, Close Friends, blocking, and time management.
+
+Phase 8: Implement testing, error handling, performance improvements, and security verification.
+
+Phase 9: Build the application, fix compilation errors, verify available tests, and document setup and release procedures.
+
+Deliver:
+
+Complete Android source code.
+Backend implementation and configuration instructions.
+Database schema and required indexes.
+Database security rules.
+Server-side functions.
+Authentication setup instructions.
+Media storage configuration.
+Notification configuration.
+Environment variable documentation.
+Automated tests.
+Android build instructions.
+A list of any features that remain incomplete or require third-party configuration.
+18. Mandatory Execution Rules
+Start by inspecting the available tools, framework support, and project environment.
+Make concrete implementation changes rather than only explaining how to build the app.
+Prioritize a working vertical slice before expanding into secondary features.
+Never pretend that a backend, database, authentication provider, or external integration has been configured when it has not.
+Never fabricate user-generated content or backend results.
+Never leave important buttons as nonfunctional placeholders.
+Never bypass privacy or security rules to make a feature appear to work.
+Do not claim that the project builds, runs, or passes tests without verification.
+If a feature cannot be completed in one pass, implement it in clearly defined stages and report the remaining work honestly.
+If a required credential or configuration value is missing, identify it and provide exact setup instructions instead of inventing credentials.
+Keep the interface consistent with the original design system.
+Ensure every feature uses real data, authenticated operations, and persistent storage where required.
+
+Begin by creating the project architecture, implementing the backend configuration, and building the authentication flow. Then continue implementing and testing the app feature by feature. Do not stop after generating a design or a plan.

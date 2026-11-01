@@ -1,0 +1,6 @@
+{
+  "name": "Mitr",
+  "description": "Mitr is a modern, full-featured social networking platform with posts, stories, reels, direct messaging, and granular privacy controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
