@@ -255,6 +255,7 @@ service cloud.firestore {
              isValidOptionalString(data, 'highlightTitle', 60) &&
              (!('taggedUsernames' in data) || isValidStringList(data.taggedUsernames, 20)) &&
              (!('collaboratorUsernames' in data) || isValidStringList(data.collaboratorUsernames, 20)) &&
+             (!('reactionEntries' in data) || isValidStringList(data.reactionEntries, 500)) &&
              data.createdAt is timestamp &&
              data.expiresAtMillis is int && data.expiresAtMillis > 0;
     }
@@ -267,7 +268,7 @@ service cloud.firestore {
                        isValidId(storyId) &&
                        incoming().authorId == request.auth.uid &&
                        incoming().keys().hasAll(['authorId', 'authorUsername', 'authorDisplayName', 'mediaUrl', 'mediaType', 'caption', 'audience', 'allowedViewerIds', 'viewerIds', 'createdAt', 'expiresAtMillis']) &&
-                       incoming().keys().hasOnly(['authorId', 'authorUsername', 'authorDisplayName', 'mediaUrl', 'mediaType', 'caption', 'overlayText', 'stickerLabel', 'audience', 'allowedViewerIds', 'viewerIds', 'musicTrackId', 'musicTitle', 'musicArtist', 'musicCoverUrl', 'musicUrl', 'musicStartMs', 'musicEndMs', 'isHighlighted', 'highlightTitle', 'taggedUsernames', 'collaboratorUsernames', 'createdAt', 'expiresAtMillis']) &&
+                       incoming().keys().hasOnly(['authorId', 'authorUsername', 'authorDisplayName', 'mediaUrl', 'mediaType', 'caption', 'overlayText', 'stickerLabel', 'audience', 'allowedViewerIds', 'viewerIds', 'musicTrackId', 'musicTitle', 'musicArtist', 'musicCoverUrl', 'musicUrl', 'musicStartMs', 'musicEndMs', 'isHighlighted', 'highlightTitle', 'taggedUsernames', 'collaboratorUsernames', 'reactionEntries', 'createdAt', 'expiresAtMillis']) &&
                        incoming().createdAt <= request.time &&
                        isValidStory(incoming());
 
@@ -279,7 +280,7 @@ service cloud.firestore {
                        (existing().audience == 'PUBLIC' ||
                         existing().authorId == request.auth.uid ||
                         request.auth.uid in existing().allowedViewerIds) &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['viewerIds', 'allowedViewerIds', 'caption', 'isHighlighted', 'highlightTitle', 'taggedUsernames', 'collaboratorUsernames']);
+                       incoming().diff(existing()).affectedKeys().hasOnly(['viewerIds', 'allowedViewerIds', 'caption', 'isHighlighted', 'highlightTitle', 'taggedUsernames', 'collaboratorUsernames', 'reactionEntries']);
 
       allow delete: if isSignedIn() && isValidId(storyId) && existing().authorId == request.auth.uid;
     }
@@ -293,6 +294,8 @@ service cloud.firestore {
              data.caption is string && data.caption.size() <= 2200 &&
              data.audioTrackName is string && data.audioTrackName.size() <= 120 &&
              data.durationSeconds is int && data.durationSeconds >= 1 && data.durationSeconds <= 180 &&
+             isValidOptionalInt(data, 'videoTrimStartMs', 0, 600000) &&
+             isValidOptionalInt(data, 'videoTrimEndMs', 0, 600000) &&
              data.visibility in ['PUBLIC', 'FOLLOWERS'] &&
              data.likeCount is int && data.likeCount >= 0 &&
              data.commentCount is int && data.commentCount >= 0 &&
@@ -319,7 +322,7 @@ service cloud.firestore {
                        isValidId(reelId) &&
                        incoming().authorId == request.auth.uid &&
                        incoming().keys().hasAll(['authorId', 'authorUsername', 'authorDisplayName', 'videoUrl', 'caption', 'audioTrackName', 'durationSeconds', 'visibility', 'likeCount', 'commentCount', 'viewCount', 'createdAt', 'updatedAt']) &&
-                       incoming().keys().hasOnly(['authorId', 'authorUsername', 'authorDisplayName', 'videoUrl', 'caption', 'audioTrackName', 'durationSeconds', 'visibility', 'likeCount', 'commentCount', 'viewCount', 'likedByUids', 'taggedUsernames', 'collaboratorUsernames', 'musicTrackId', 'musicTitle', 'musicArtist', 'musicCoverUrl', 'musicUrl', 'musicStartMs', 'musicEndMs', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['authorId', 'authorUsername', 'authorDisplayName', 'videoUrl', 'caption', 'audioTrackName', 'durationSeconds', 'videoTrimStartMs', 'videoTrimEndMs', 'visibility', 'likeCount', 'commentCount', 'viewCount', 'likedByUids', 'taggedUsernames', 'collaboratorUsernames', 'musicTrackId', 'musicTitle', 'musicArtist', 'musicCoverUrl', 'musicUrl', 'musicStartMs', 'musicEndMs', 'createdAt', 'updatedAt']) &&
                        incoming().createdAt <= request.time &&
                        isValidReel(incoming());
 
@@ -368,10 +371,11 @@ service cloud.firestore {
                        (existing().followerId == request.auth.uid || existing().followingId == request.auth.uid);
     }
 
-    // --- 9. Saved Posts (/saved_posts/{savedId}) ---
+    // --- 9. Saved Posts & Saved Reels (/saved_posts/{savedId}, /saved_reels/{savedId}, /users/{userId}/saved_reels/{reelId}) ---
     function isValidSavedPost(data) {
       return data.userId is string && data.userId == request.auth.uid &&
              data.postId is string && data.postId.size() >= 1 && data.postId.size() <= 128 &&
+             isValidOptionalString(data, 'reelId', 128) &&
              data.targetType in ['POST', 'REEL'] &&
              data.authorUsername is string && data.authorUsername.size() >= 1 && data.authorUsername.size() <= 40 &&
              data.captionPreview is string && data.captionPreview.size() <= 300 &&
@@ -387,11 +391,44 @@ service cloud.firestore {
                        isValidId(savedId) &&
                        incoming().userId == request.auth.uid &&
                        incoming().keys().hasAll(['userId', 'postId', 'targetType', 'authorUsername', 'captionPreview', 'createdAt']) &&
-                       incoming().keys().hasOnly(['userId', 'postId', 'targetType', 'authorUsername', 'captionPreview', 'mediaUrl', 'createdAt']) &&
+                       incoming().keys().hasOnly(['userId', 'postId', 'reelId', 'targetType', 'authorUsername', 'captionPreview', 'mediaUrl', 'createdAt']) &&
                        isValidSavedPost(incoming());
 
       allow update: if false;
       allow delete: if isSignedIn() && isValidId(savedId) && existing().userId == request.auth.uid;
+    }
+
+    function isValidSavedReel(data) {
+      return data.userId is string && data.userId == request.auth.uid &&
+             data.reelId is string && data.reelId.size() >= 1 && data.reelId.size() <= 128 &&
+             isValidOptionalString(data, 'postId', 128) &&
+             isValidOptionalString(data, 'targetType', 20) &&
+             data.authorUsername is string && data.authorUsername.size() >= 1 && data.authorUsername.size() <= 40 &&
+             isValidOptionalString(data, 'captionPreview', 300) &&
+             isValidOptionalString(data, 'mediaUrl', 1000) &&
+             isValidOptionalString(data, 'videoUrl', 1000) &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    match /saved_reels/{savedId} {
+      allow get: if isSignedIn() && isValidId(savedId) && (resource == null || existing().userId == request.auth.uid);
+      allow list: if isSignedIn() && existing().userId == request.auth.uid;
+      allow create: if isSignedIn() &&
+                       isValidId(savedId) &&
+                       incoming().userId == request.auth.uid &&
+                       isValidSavedReel(incoming());
+      allow update: if false;
+      allow delete: if isSignedIn() && isValidId(savedId) && existing().userId == request.auth.uid;
+    }
+
+    match /users/{userId}/saved_reels/{reelId} {
+      allow get, list: if isSignedIn() && request.auth.uid == userId;
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       isValidId(reelId) &&
+                       request.auth.uid == userId &&
+                       isValidSavedReel(incoming());
+      allow update, delete: if isSignedIn() && request.auth.uid == userId;
     }
 
     // --- 9b. Saved Music (/saved_music/{savedId}) ---
@@ -441,13 +478,15 @@ service cloud.firestore {
     function isValidDirectMessage(data) {
       return data.conversationId is string && data.conversationId.size() >= 1 && data.conversationId.size() <= 128 &&
              isValidStringList(data.participantIds, 10) &&
-             data.senderId is string && data.senderId == request.auth.uid &&
+             data.senderId is string && data.senderId in data.participantIds &&
              data.senderUsername is string && data.senderUsername.size() >= 1 && data.senderUsername.size() <= 40 &&
              data.text is string && data.text.size() >= 1 && data.text.size() <= 2000 &&
              isValidOptionalString(data, 'mediaUrl', 1000) &&
              data.mediaType in ['NONE', 'IMAGE', 'VIDEO'] &&
              isValidOptionalString(data, 'replyToMessageId', 128) &&
              data.deliveryStatus in ['SENT', 'DELIVERED', 'READ'] &&
+             (!('readByUids' in data) || isValidStringList(data.readByUids, 10)) &&
+             (!('readAtMillis' in data) || (data.readAtMillis is int && data.readAtMillis >= 0)) &&
              data.createdAt is timestamp && data.createdAt <= request.time;
     }
 
@@ -485,7 +524,7 @@ service cloud.firestore {
                          request.auth.uid in incoming().participantIds &&
                          incoming().senderId == request.auth.uid &&
                          incoming().keys().hasAll(['conversationId', 'participantIds', 'senderId', 'senderUsername', 'text', 'mediaType', 'deliveryStatus', 'createdAt']) &&
-                         incoming().keys().hasOnly(['conversationId', 'participantIds', 'senderId', 'senderUsername', 'text', 'mediaUrl', 'mediaType', 'replyToMessageId', 'deliveryStatus', 'createdAt']) &&
+                         incoming().keys().hasOnly(['conversationId', 'participantIds', 'senderId', 'senderUsername', 'text', 'mediaUrl', 'mediaType', 'replyToMessageId', 'deliveryStatus', 'readByUids', 'readAtMillis', 'createdAt']) &&
                          isValidDirectMessage(incoming());
 
         allow update: if isSignedIn() &&
@@ -494,7 +533,7 @@ service cloud.firestore {
                          isValidDirectMessage(incoming()) &&
                          incoming().senderId == existing().senderId &&
                          incoming().createdAt == existing().createdAt &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['deliveryStatus']);
+                         incoming().diff(existing()).affectedKeys().hasOnly(['deliveryStatus', 'readByUids', 'readAtMillis']);
 
         allow delete: if isSignedIn() && isValidId(messageId) && existing().senderId == request.auth.uid;
       }
@@ -582,7 +621,7 @@ service cloud.firestore {
              data.actorUsername is string && data.actorUsername.size() >= 1 && data.actorUsername.size() <= 60 &&
              isValidOptionalString(data, 'actorDisplayName', 80) &&
              isValidOptionalString(data, 'actorAvatarUrl', 1000) &&
-             data.type in ['LIKE', 'COMMENT', 'FOLLOW', 'COLLAB', 'MENTION'] &&
+             data.type in ['LIKE', 'COMMENT', 'FOLLOW', 'COLLAB', 'MENTION', 'STORY_REACTION'] &&
              data.message is string && data.message.size() >= 1 && data.message.size() <= 500 &&
              isValidOptionalString(data, 'detailText', 500) &&
              isValidOptionalString(data, 'targetId', 128) &&
@@ -617,6 +656,44 @@ service cloud.firestore {
                        incoming().recipientId == userId &&
                        isValidNotification(incoming());
       allow update, delete: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    // --- 15. Story Emoji Reactions (/story_reactions/{reactionId}) linked to storyId ---
+    function isValidStoryReaction(data) {
+      return data.storyId is string && data.storyId.size() >= 1 && data.storyId.size() <= 128 &&
+             isValidOptionalString(data, 'storyAuthorId', 128) &&
+             data.userId is string && data.userId == request.auth.uid &&
+             data.username is string && data.username.size() >= 1 && data.username.size() <= 60 &&
+             isValidOptionalString(data, 'displayName', 80) &&
+             data.emoji is string && data.emoji.size() >= 1 && data.emoji.size() <= 32 &&
+             isValidOptionalString(data, 'feelingLabel', 40) &&
+             isValidOptionalString(data, 'replyText', 300) &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    match /story_reactions/{reactionId} {
+      allow get, list: if isSignedIn();
+      allow create, update: if isSignedIn() &&
+                               isValidId(reactionId) &&
+                               incoming().userId == request.auth.uid &&
+                               isValidStoryReaction(incoming());
+      allow delete: if isSignedIn() &&
+                       isValidId(reactionId) &&
+                       (existing().userId == request.auth.uid || existing().storyAuthorId == request.auth.uid);
+    }
+
+    // --- 16. FCM Push Notification Registration Tokens (/fcm_tokens/{userId}) ---
+    match /fcm_tokens/{userId} {
+      allow get: if isSignedIn() && isValidId(userId);
+      allow list: if isSignedIn() && request.auth.uid == userId;
+      allow create, update: if isSignedIn() &&
+                               isValidId(userId) &&
+                               request.auth.uid == userId &&
+                               incoming().userId == request.auth.uid &&
+                               incoming().token is string &&
+                               incoming().token.size() >= 1 &&
+                               incoming().token.size() <= 1024;
+      allow delete: if isSignedIn() && request.auth.uid == userId;
     }
   }
 }

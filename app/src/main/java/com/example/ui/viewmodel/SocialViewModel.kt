@@ -17,7 +17,9 @@ import com.example.data.model.SavedAccountSession
 import com.example.data.model.SavedMusic
 import com.example.data.model.SavedPost
 import com.example.data.model.SocialNotificationItem
+import com.example.data.local.MobileStorageStats
 import com.example.data.model.Story
+import com.example.data.model.StoryReaction
 import com.example.data.model.UiState
 import com.example.data.model.UserActivityLog
 import com.example.data.model.UserProfile
@@ -25,6 +27,7 @@ import com.example.data.model.UserRelation
 import com.example.data.model.UserSettings
 import com.example.data.model.isFounderVipAccount
 import com.example.data.model.isUserBlueTickVerified
+import com.example.data.model.storyFeelingLabelForEmoji
 import com.example.data.repository.MusicRepository
 import com.example.data.repository.SocialRepository
 import kotlinx.coroutines.Job
@@ -76,12 +79,24 @@ class SocialViewModel(
 
     private val _inspectedUserProfile = MutableStateFlow<UserProfile?>(null)
     val inspectedUserProfileState: StateFlow<UserProfile?> = _inspectedUserProfile.asStateFlow()
+    private val _inspectedUserPosts = MutableStateFlow<List<Post>>(emptyList())
+    val inspectedUserPostsState: StateFlow<List<Post>> = _inspectedUserPosts.asStateFlow()
+    private val _inspectedUserReels = MutableStateFlow<List<Reel>>(emptyList())
+    val inspectedUserReelsState: StateFlow<List<Reel>> = _inspectedUserReels.asStateFlow()
     private var inspectProfileJob: Job? = null
 
     private val seenNotificationDocIds = mutableSetOf<String>()
     private var initialNotificationsLoaded = false
     private val _latestFirestoreNotificationEvent = MutableStateFlow<FirestoreNotification?>(null)
     val latestFirestoreNotificationEvent: StateFlow<FirestoreNotification?> = _latestFirestoreNotificationEvent.asStateFlow()
+
+    private val seenConversationMessageSignatures = mutableMapOf<String, String>()
+    private var initialConversationsLoaded = false
+    private val _latestIncomingDirectMessageEvent = MutableStateFlow<Conversation?>(null)
+    val latestIncomingDirectMessageEvent: StateFlow<Conversation?> = _latestIncomingDirectMessageEvent.asStateFlow()
+
+    private val _mobileStorageStats = MutableStateFlow(MobileStorageStats())
+    val mobileStorageStatsState: StateFlow<MobileStorageStats> = _mobileStorageStats.asStateFlow()
 
     val currentUserProfileState: StateFlow<UiState<UserProfile?>> = repository.observeCurrentUserProfile()
         .map<UserProfile?, UiState<UserProfile?>> { profile ->
@@ -143,6 +158,14 @@ class SocialViewModel(
             initialValue = emptyList()
         )
 
+    val ownReelsState: StateFlow<List<Reel>> = repository.observeUserReels(currentUserId)
+        .catch { emit(emptyList()) }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000L),
+            initialValue = emptyList()
+        )
+
     val savedPostsState: StateFlow<List<SavedPost>> = repository.observeSavedPosts()
         .catch { emit(emptyList()) }
         .stateIn(
@@ -176,19 +199,32 @@ class SocialViewModel(
         )
 
     /**
-     * All accessible stories (active 24h stories + highlighted stories) for viewing on Profile screens.
+     * Personal Story Archive: all stories authored by the signed-in user (active 24h + expired >24h),
+     * sorted newest-first for the organized Profile Story Archive section.
+     */
+    val storyArchiveState: StateFlow<List<Story>> = repository.observeUserStoryArchive()
+        .catch { emit(emptyList()) }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000L),
+            initialValue = emptyList()
+        )
+
+    /**
+     * All accessible stories (active 24h stories + highlighted stories + own archived stories) for viewing on Profile screens.
      * Anyone visiting a user's Profile can tap their avatar or Highlights row to view their stories.
      */
     val allAccessibleStoriesState: StateFlow<List<Story>> = combine(
         repository.observeActiveStories(),
         repository.observeCloseFriendsStories(),
+        storyArchiveState,
         userRelationsState
-    ) { publicStories, cfStories, relations ->
+    ) { publicStories, cfStories, ownArchived, relations ->
         val blockedIds = relations
             .filter { it.relationType == "BLOCKED" }
             .map { it.targetUserId }
             .toSet()
-        (publicStories + cfStories)
+        (publicStories + cfStories + ownArchived)
             .distinctBy { it.id }
             .filter { !blockedIds.contains(it.authorId) }
             .sortedByDescending { it.expiresAtMillis }
@@ -233,12 +269,14 @@ class SocialViewModel(
 
     val reelsState: StateFlow<UiState<List<Reel>>> = combine(
         repository.observePublicReels(),
+        ownReelsState,
         repository.observeAllDiscoverableUsers().catch { emit(emptyList()) },
         userRelationsState
-    ) { reels, users, relations ->
+    ) { reels, ownReels, users, relations ->
         val blockedIds = relations.filter { it.relationType == "BLOCKED" }.map { it.targetUserId }.toSet()
         val verifiedUserIds = users.filter { isUserBlueTickVerified(it) }.map { it.userId }.toSet()
-        val rankedReels = reels
+        val rankedReels = (ownReels + reels)
+            .distinctBy { it.id }
             .filter { !blockedIds.contains(it.authorId) }
             .sortedWith(
                 compareByDescending<Reel> { reel ->
@@ -258,7 +296,29 @@ class SocialViewModel(
         userRelationsState
     ) { convs, relations ->
         val blockedIds = relations.filter { it.relationType == "BLOCKED" }.map { it.targetUserId }.toSet()
-        convs.filter { conv -> conv.participantIds.none { blockedIds.contains(it) } }
+        val visible = convs.filter { conv -> conv.participantIds.none { blockedIds.contains(it) } }
+        if (!initialConversationsLoaded) {
+            visible.forEach { c ->
+                seenConversationMessageSignatures[c.id] = "${c.lastSenderId}|${c.lastMessageText}|${c.unreadCount}"
+            }
+            initialConversationsLoaded = true
+        } else {
+            for (c in visible) {
+                val sig = "${c.lastSenderId}|${c.lastMessageText}|${c.unreadCount}"
+                val prevSig = seenConversationMessageSignatures[c.id]
+                seenConversationMessageSignatures[c.id] = sig
+                if (prevSig != sig &&
+                    c.lastSenderId.isNotBlank() &&
+                    c.lastSenderId != currentUserId &&
+                    c.unreadCount > 0L &&
+                    c.lastMessageText.isNotBlank() &&
+                    c.lastMessageText != "Conversation started"
+                ) {
+                    _latestIncomingDirectMessageEvent.value = c
+                }
+            }
+        }
+        visible
     }.catch { emit(emptyList()) }
         .stateIn(
             scope = viewModelScope,
@@ -394,7 +454,7 @@ class SocialViewModel(
         // 0. Documents from Firestore Notifications collection
         fsNotifs.forEach { doc ->
             val category = when (doc.type) {
-                "LIKE" -> NotificationCategory.LIKES
+                "LIKE", "STORY_REACTION" -> NotificationCategory.LIKES
                 "FOLLOW" -> NotificationCategory.FOLLOWS
                 "COMMENT" -> NotificationCategory.COMMENTS
                 "COLLAB", "MENTION" -> NotificationCategory.COLLABS
@@ -568,11 +628,41 @@ class SocialViewModel(
         loadSavedAccountsFromPrefs()
         startRealSessionTimeTracker()
         searchMusic(query = "", genre = "Indian Hits")
+        viewModelScope.launch {
+            repository.verifyFirestoreConnectionAndRules()
+            refreshMobileStorageStats()
+        }
     }
 
     fun consumeLatestFirestoreNotificationEvent() {
         _latestFirestoreNotificationEvent.value = null
     }
+
+    fun consumeLatestIncomingDirectMessageEvent() {
+        _latestIncomingDirectMessageEvent.value = null
+    }
+
+    fun refreshMobileStorageStats() {
+        viewModelScope.launch {
+            _mobileStorageStats.value = repository.getMobileStorageStats()
+        }
+    }
+
+    fun offloadChatsToMobileStorage(conversationId: String? = null) {
+        viewModelScope.launch {
+            repository.offloadChatHistoryToMobileStorage(conversationId = conversationId)
+                .onSuccess { stats ->
+                    _mobileStorageStats.value = stats
+                    _statusBanner.value = "Saved ${stats.localMessagesCount} chat messages & ${stats.localActivityLogsCount} activity logs to phone storage (Cloud DB freed)"
+                }
+                .onFailure { err ->
+                    _statusBanner.value = err.localizedMessage ?: "Could not offload chats to mobile storage"
+                }
+        }
+    }
+
+    fun observeStoryReactions(storyId: String): kotlinx.coroutines.flow.Flow<List<StoryReaction>> =
+        repository.observeStoryReactions(storyId)
 
     fun observeFollowersForUser(targetUserId: String) = repository.observeFollowersForUser(targetUserId)
 
@@ -638,6 +728,7 @@ class SocialViewModel(
     fun triggerPullToRefresh() {
         viewModelScope.launch {
             _isRefreshing.value = true
+            repository.verifyFirestoreConnectionAndRules()
             delay(500L)
             _isRefreshing.value = false
         }
@@ -759,9 +850,24 @@ class SocialViewModel(
         viewModelScope.launch {
             repository.toggleSavePost(postId, targetType, authorUsername, captionPreview, mediaUrl)
                 .onSuccess { saved ->
-                    _statusBanner.value = if (saved) "Saved to collection" else "Removed from saved"
+                    val label = if (targetType.equals("REEL", ignoreCase = true)) "Reel" else "Post"
+                    _statusBanner.value = if (saved) "$label saved to your collection" else "Removed $label from saved"
                 }
                 .onFailure { _statusBanner.value = it.localizedMessage ?: "Failed to update bookmark" }
+        }
+    }
+
+    fun toggleSaveReel(reel: Reel) {
+        viewModelScope.launch {
+            repository.toggleSaveReel(reel)
+                .onSuccess { saved ->
+                    _statusBanner.value = if (saved) {
+                        "Saved @${reel.authorUsername}'s Reel to your collection"
+                    } else {
+                        "Removed Reel from saved collection"
+                    }
+                }
+                .onFailure { _statusBanner.value = it.localizedMessage ?: "Failed to save Reel" }
         }
     }
 
@@ -806,6 +912,28 @@ class SocialViewModel(
     fun recordStoryView(story: Story) {
         viewModelScope.launch {
             repository.recordStoryView(story)
+        }
+    }
+
+    fun reactToStory(story: Story, emoji: String, replyText: String = "") {
+        val actor = (currentUserProfileState.value as? UiState.Success)?.data ?: return
+        val feelingLabel = storyFeelingLabelForEmoji(emoji)
+        viewModelScope.launch {
+            repository.reactToStoryWithEmoji(
+                story = story,
+                actorProfile = actor,
+                emoji = emoji,
+                replyText = replyText
+            ).onSuccess {
+                refreshMobileStorageStats()
+                _statusBanner.value = if (replyText.isNotBlank()) {
+                    "Sent $emoji ($feelingLabel) & reply to @${story.authorUsername}'s story"
+                } else {
+                    "Sent $emoji ($feelingLabel) reaction to @${story.authorUsername}'s story"
+                }
+            }.onFailure { err ->
+                _statusBanner.value = err.localizedMessage ?: "Could not send story reaction"
+            }
         }
     }
 
@@ -860,6 +988,8 @@ class SocialViewModel(
         musicTrack: MusicTrack? = null,
         taggedUsernames: List<String> = emptyList(),
         collaboratorUsernames: List<String> = emptyList(),
+        videoTrimStartMs: Long = 0L,
+        videoTrimEndMs: Long = durationSeconds.coerceIn(15L, 60L) * 1000L,
         onComplete: () -> Unit = {}
     ) {
         val author = (currentUserProfileState.value as? UiState.Success)?.data ?: return
@@ -869,15 +999,17 @@ class SocialViewModel(
                 videoUrl = videoUrl,
                 caption = caption,
                 audioTrackName = audioTrackName,
-                durationSeconds = durationSeconds,
+                durationSeconds = durationSeconds.coerceIn(15L, 60L),
                 musicTrack = musicTrack,
                 taggedUsernames = taggedUsernames,
-                collaboratorUsernames = collaboratorUsernames
+                collaboratorUsernames = collaboratorUsernames,
+                videoTrimStartMs = videoTrimStartMs,
+                videoTrimEndMs = videoTrimEndMs
             ).onSuccess {
                 _statusBanner.value = if (collaboratorUsernames.isNotEmpty()) {
-                    "Collab reel published with ${collaboratorUsernames.joinToString { "@$it" }}"
+                    "Collab reel (${durationSeconds.coerceIn(15L, 60L)}s) published with ${collaboratorUsernames.joinToString { "@$it" }}"
                 } else {
-                    "Reel published"
+                    "Reel (${durationSeconds.coerceIn(15L, 60L)}s trimmed clip) published"
                 }
                 onComplete()
             }.onFailure {
@@ -895,6 +1027,14 @@ class SocialViewModel(
     fun incrementReelView(reel: Reel) {
         viewModelScope.launch {
             repository.incrementReelView(reel)
+        }
+    }
+
+    fun deleteReel(reelId: String) {
+        viewModelScope.launch {
+            repository.deleteReel(reelId)
+                .onSuccess { _statusBanner.value = "Reel deleted" }
+                .onFailure { _statusBanner.value = it.localizedMessage ?: "Failed to delete reel" }
         }
     }
 
@@ -1014,7 +1154,9 @@ class SocialViewModel(
                 mediaUrl = mediaUrl,
                 mediaType = mediaType,
                 replyToMessageId = replyToMessageId
-            ).onFailure {
+            ).onSuccess {
+                refreshMobileStorageStats()
+            }.onFailure {
                 _statusBanner.value = it.localizedMessage ?: "Failed to send message"
             }
         }
@@ -1038,8 +1180,12 @@ class SocialViewModel(
     }
 
     fun markConversationRead(conversationId: String) {
+        val readReceiptsOn = userSettingsState.value.readReceiptsEnabled
         viewModelScope.launch {
-            repository.markConversationRead(conversationId)
+            repository.markConversationRead(
+                conversationId = conversationId,
+                readReceiptsEnabled = readReceiptsOn
+            )
         }
     }
 
@@ -1048,6 +1194,8 @@ class SocialViewModel(
         val clean = identifier?.trim() ?: ""
         if (clean.isBlank()) {
             _inspectedUserProfile.value = null
+            _inspectedUserPosts.value = emptyList()
+            _inspectedUserReels.value = emptyList()
             return
         }
         // Immediately populate from existing in-memory cache if available
@@ -1063,11 +1211,29 @@ class SocialViewModel(
         if (cached != null) {
             _inspectedUserProfile.value = cached
         }
-        // Also fetch fresh profile from Firestore (resolving by UID or @username)
+        // Also fetch fresh profile, recent public posts, and reels from Firestore (resolving by UID or @username)
         inspectProfileJob = viewModelScope.launch {
-            repository.resolveUserProfile(clean).onSuccess { resolved ->
-                if (resolved != null) {
-                    _inspectedUserProfile.value = resolved
+            val resolved = repository.resolveUserProfile(clean).getOrNull()
+            val targetUid = resolved?.userId?.ifBlank { cached?.userId } ?: clean
+            val targetUsername = resolved?.username?.ifBlank { cached?.username } ?: clean.removePrefix("@")
+            if (resolved != null) {
+                _inspectedUserProfile.value = resolved
+            }
+            launch {
+                repository.observeUserPosts(targetUid, targetUsername).collect { posts ->
+                    _inspectedUserPosts.value = posts
+                }
+            }
+            launch {
+                repository.observeUserReels(targetUid, targetUsername).collect { reels ->
+                    _inspectedUserReels.value = reels
+                }
+            }
+            if (resolved != null) {
+                repository.observeUserProfileById(resolved.userId).collect { liveProfile ->
+                    if (liveProfile != null) {
+                        _inspectedUserProfile.value = liveProfile
+                    }
                 }
             }
         }

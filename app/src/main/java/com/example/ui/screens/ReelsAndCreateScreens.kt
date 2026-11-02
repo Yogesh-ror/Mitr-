@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -8,7 +9,9 @@ import android.graphics.Bitmap
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Shader
+import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.provider.MediaStore
 import android.widget.VideoView
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -53,8 +56,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.FilterVintage
 import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.FlashOff
+import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
@@ -64,7 +71,9 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.VideoLibrary
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.outlined.ModeComment
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -76,6 +85,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -110,12 +120,21 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
+import com.example.BuildConfig
 import com.example.data.model.Comment
+import com.example.data.model.MAX_REEL_DURATION_SECONDS
+import com.example.data.model.MIN_REEL_DURATION_SECONDS
 import com.example.data.model.MusicTrack
 import com.example.data.model.Reel
 import com.example.data.model.SavedMusic
 import com.example.data.model.SavedPost
 import com.example.data.model.UiState
+import com.example.data.model.UserProfile
+import com.example.data.model.clampReelVideoTrimWindow
+import com.example.data.model.isCreatorHandleBlueTickVerified
+import com.example.data.model.isValidMusicApiKey
+import com.example.data.model.overlayMusicTrackOnReelVideo
+import com.example.data.repository.MusicRepository
 import com.example.ui.components.AttachedMusicPillBanner
 import com.example.ui.components.AuroraAmbientBackground
 import com.example.ui.components.LuminaGlassCard
@@ -123,8 +142,10 @@ import com.example.ui.components.LuminaGradientButton
 import com.example.ui.components.LuminaPillChip
 import com.example.ui.components.MitrIcons
 import com.example.ui.components.MitrReelAdMobPage
+import com.example.ui.components.MitrTopHeaderBar
 import com.example.ui.components.MusicBrowserBottomSheet
 import com.example.ui.components.MusicTrimmerStudioCard
+import com.example.ui.components.VerifiedBadgeIcon
 import com.example.ui.components.formatMillisToMinSec
 import com.example.ui.components.rememberAudioClipPlayer
 import com.example.ui.theme.LuminaAmber
@@ -135,17 +156,14 @@ import com.example.ui.theme.LuminaPrismGradient
 import com.example.ui.theme.LuminaViolet
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
-import com.google.firebase.ai.type.RequestOptions
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
-
-import com.example.data.model.UserProfile
-import com.example.data.model.isCreatorHandleBlueTickVerified
-import com.example.ui.components.MitrTopHeaderBar
-import com.example.ui.components.VerifiedBadgeIcon
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 
 private sealed interface ReelPagerItem {
     data class Content(val reel: Reel) : ReelPagerItem
@@ -162,6 +180,8 @@ fun ReelsFeedScreen(
     discoverableUsers: List<UserProfile> = emptyList(),
     followingIds: List<String> = emptyList(),
     autoplayVideos: Boolean,
+    initialReelId: String? = null,
+    onConsumeInitialReel: () -> Unit = {},
     onLikeReel: (Reel) -> Unit,
     onSaveReel: (Reel) -> Unit,
     onToggleSaveMusic: (MusicTrack) -> Unit,
@@ -249,15 +269,27 @@ fun ReelsFeedScreen(
                 }
 
                 is UiState.Success -> {
-                    val reels = remember(reelsState.data, currentUserProfile.username) {
+                    val reels = remember(reelsState.data, currentUserProfile.username, initialReelId) {
                         val myUname = currentUserProfile.username.lowercase()
-                        reelsState.data.sortedWith(
-                            compareByDescending<Reel> { reel ->
-                                reel.collaboratorUsernames.any {
-                                    it.removePrefix("@").lowercase() == myUname
+                        reelsState.data
+                            .distinctBy { it.id }
+                            .distinctBy { reel ->
+                                val timeBucket = (reel.createdAt?.seconds ?: 0L) / 30L
+                                if (reel.videoUrl.isBlank() && reel.caption.isBlank()) {
+                                    reel.id
+                                } else {
+                                    "${reel.authorId}|${reel.videoUrl.trim()}|${reel.caption.trim()}|$timeBucket"
                                 }
-                            }.thenByDescending { it.createdAt?.toDate()?.time ?: 0L }
-                        )
+                            }
+                            .sortedWith(
+                                compareByDescending<Reel> { reel ->
+                                    !initialReelId.isNullOrBlank() && reel.id == initialReelId
+                                }.thenByDescending { reel ->
+                                    reel.collaboratorUsernames.any {
+                                        it.removePrefix("@").lowercase() == myUname
+                                    }
+                                }.thenByDescending { it.createdAt?.toDate()?.time ?: 0L }
+                            )
                     }
                     if (reels.isEmpty()) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -274,18 +306,28 @@ fun ReelsFeedScreen(
                                 var adCount = 0
                                 reels.forEachIndexed { idx, reelItem ->
                                     add(ReelPagerItem.Content(reelItem))
-                                    // Insert 1 AdMob Reel Ad every 10 reels
+                                    // Insert 1 AdMob Reel Ad only after every 10 distinct reels
                                     if ((idx + 1) % 10 == 0) {
                                         adCount += 1
                                         add(ReelPagerItem.AdSlot(adCount))
                                     }
                                 }
-                                if (reels.size < 10) {
-                                    add(ReelPagerItem.AdSlot(1))
-                                }
                             }
                         }
                         val pagerState = rememberPagerState(pageCount = { pagerItems.size })
+
+                        LaunchedEffect(initialReelId, pagerItems) {
+                            if (!initialReelId.isNullOrBlank()) {
+                                val targetPage = pagerItems.indexOfFirst {
+                                    it is ReelPagerItem.Content && it.reel.id == initialReelId
+                                }
+                                if (targetPage >= 0) {
+                                    isPaused = false
+                                    pagerState.scrollToPage(targetPage)
+                                }
+                                onConsumeInitialReel()
+                            }
+                        }
 
                         // Immediately stop Reel music the instant the user starts scrolling between Reels!
                         LaunchedEffect(pagerState.isScrollInProgress, pagerState.currentPage, pagerState.settledPage) {
@@ -317,7 +359,9 @@ fun ReelsFeedScreen(
                                         pagerState.settledPage == page &&
                                         !pagerState.isScrollInProgress
                                     val isLiked = reel.likedByUids.contains(currentUserId)
-                                    val isSaved = savedPosts.any { it.postId == reel.id }
+                                    val isSaved = savedPosts.any {
+                                        it.postId == reel.id || it.resolvedReelId == reel.id
+                                    }
                                     val isMusicSaved = savedMusicList.any {
                                         it.trackId == reel.musicTrackId || (reel.musicTitle.isNotBlank() && it.title == reel.musicTitle)
                                     }
@@ -376,9 +420,10 @@ fun ReelsFeedScreen(
                                             .fillMaxSize()
                                             .clickable { isPaused = !isPaused }
                                     ) {
-                                        // Full-Screen Video / Thumbnail Layer
+                                        // Full-Screen Video / Thumbnail Layer (respects videoTrimStartMs..videoTrimEndMs)
                                         if (reel.videoUrl.startsWith("http") || reel.videoUrl.startsWith("content://") || reel.videoUrl.startsWith("file://")) {
                                             val shouldPlayVideo = isActiveStationaryReel && !isPaused
+                                            val trimStartMs = reel.videoTrimStartMs.coerceAtLeast(0L).toInt()
                                             AndroidView(
                                                 factory = { ctx ->
                                                     VideoView(ctx).apply {
@@ -387,6 +432,9 @@ fun ReelsFeedScreen(
                                                             mp.isLooping = true
                                                             val vol = if (isMuted || reel.musicUrl.isNotBlank()) 0f else 1f
                                                             mp.setVolume(vol, vol)
+                                                            if (trimStartMs > 0) {
+                                                                seekTo(trimStartMs)
+                                                            }
                                                             if (shouldPlayVideo) start() else pause()
                                                         }
                                                         setOnErrorListener { _, _, _ -> true }
@@ -396,7 +444,14 @@ fun ReelsFeedScreen(
                                                     if (!shouldPlayVideo && view.isPlaying) {
                                                         view.pause()
                                                     } else if (shouldPlayVideo && !view.isPlaying) {
+                                                        if (trimStartMs > 0 && view.currentPosition < trimStartMs) {
+                                                            view.seekTo(trimStartMs)
+                                                        }
                                                         view.start()
+                                                    } else if (shouldPlayVideo && reel.videoTrimEndMs > reel.videoTrimStartMs + 1000L) {
+                                                        if (view.currentPosition > reel.videoTrimEndMs.toInt()) {
+                                                            view.seekTo(trimStartMs)
+                                                        }
                                                     }
                                                 },
                                                 modifier = Modifier.fillMaxSize()
@@ -643,6 +698,37 @@ fun ReelsFeedScreen(
                                                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
                                                     )
                                                 }
+                                                Surface(
+                                                    shape = RoundedCornerShape(50),
+                                                    color = if (isSaved) LuminaAmber.copy(alpha = 0.88f) else Color.White.copy(alpha = 0.22f),
+                                                    modifier = Modifier
+                                                        .border(
+                                                            1.dp,
+                                                            if (isSaved) LuminaAmber else Color.White.copy(alpha = 0.45f),
+                                                            RoundedCornerShape(50)
+                                                        )
+                                                        .clickable { onSaveReel(reel) }
+                                                        .testTag("reel_save_pill_${reel.id}")
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = if (isSaved) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                                                            contentDescription = "Save Reel",
+                                                            tint = Color.White,
+                                                            modifier = Modifier.size(14.dp)
+                                                        )
+                                                        Text(
+                                                            text = if (isSaved) "Saved" else "Save",
+                                                            style = MaterialTheme.typography.labelMedium,
+                                                            color = Color.White,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                    }
+                                                }
                                             }
 
                                             Text(
@@ -823,19 +909,50 @@ fun ReelsFeedScreen(
                     }
                 }
 
-                Surface(
-                    onClick = { isMuted = !isMuted },
-                    shape = CircleShape,
-                    color = Color.White.copy(alpha = 0.22f),
-                    modifier = Modifier.testTag("upload_reel_fab")
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.Default.GraphicEq,
-                            contentDescription = "Audio Toggle",
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
+                    Surface(
+                        onClick = onOpenUploadReel,
+                        shape = RoundedCornerShape(50),
+                        color = LuminaCoral.copy(alpha = 0.9f),
+                        modifier = Modifier.testTag("reels_open_camera_button")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Videocam,
+                                contentDescription = "Record 15-60s Reel",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = "15-60s",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color.White,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+                    }
+
+                    Surface(
+                        onClick = { isMuted = !isMuted },
+                        shape = CircleShape,
+                        color = Color.White.copy(alpha = 0.22f),
+                        modifier = Modifier.testTag("upload_reel_fab")
+                    ) {
+                        Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.Default.GraphicEq,
+                                contentDescription = "Audio Toggle",
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -1059,7 +1176,9 @@ fun CreateContentScreen(
         durationSeconds: Long,
         musicTrack: MusicTrack?,
         collaboratorUsernames: List<String>,
-        taggedUsernames: List<String>
+        taggedUsernames: List<String>,
+        videoTrimStartMs: Long,
+        videoTrimEndMs: Long
     ) -> Unit
 ) {
     BackHandler { onBack() }
@@ -1082,13 +1201,74 @@ fun CreateContentScreen(
     var storyStickerLabel by remember { mutableStateOf("") }
     var storyAudience by remember { mutableStateOf("PUBLIC") }
 
+    // 15-60s Short-Form Reel Duration & Video Trimmer State
     var reelDurationSeconds by remember { mutableLongStateOf(15L) }
+    var sourceVideoDurationSeconds by remember { mutableLongStateOf(60L) }
+    var videoTrimStartSeconds by remember { mutableLongStateOf(0L) }
+    var videoTrimEndSeconds by remember { mutableLongStateOf(15L) }
+    var isPreviewingVideoTrim by remember { mutableStateOf(false) }
+    var showReelCameraRecorderDialog by remember { mutableStateOf(false) }
+
     var attachedMusicTrack by remember { mutableStateOf<MusicTrack?>(null) }
     var showMusicBrowserSheet by remember { mutableStateOf(false) }
+    var reelMusicOverlayMixPercent by remember { mutableIntStateOf(100) }
+    var inlineReelMusicQuery by remember { mutableStateOf("") }
+    val isMusicApiConfigured = remember { isValidMusicApiKey(BuildConfig.MUSIC_API_KEY) }
+    val fallbackOverlayTracks = remember { MusicRepository().featuredIndianSongs }
 
     var selectedFilterIndex by remember { mutableIntStateOf(0) }
     var canvasThemeCounter by remember { mutableIntStateOf(0) }
     var permissionMessage by remember { mutableStateOf<String?>(null) }
+
+    // Synchronize overlaid background music playback with live Reel video preview loop
+    LaunchedEffect(
+        selectedTab,
+        isPreviewingVideoTrim,
+        attachedMusicTrack?.trackId,
+        attachedMusicTrack?.trimStartMs,
+        attachedMusicTrack?.trimEndMs
+    ) {
+        val track = attachedMusicTrack
+        if (selectedTab == 2 && isPreviewingVideoTrim && track != null && track.audioUrl.isNotBlank()) {
+            audioPlayer.playSyncedForOwner(
+                ownerKey = "reel_studio_video_overlay",
+                url = track.audioUrl,
+                startMs = track.trimStartMs,
+                endMs = track.trimEndMs
+            )
+        } else if (audioPlayer.currentOwnerKey == "reel_studio_video_overlay") {
+            audioPlayer.stopForOwner("reel_studio_video_overlay")
+        }
+    }
+
+    val updateVideoTrimBounds = { rawStartSec: Long, rawEndSec: Long, maxSourceSec: Long ->
+        val safeSourceSec = maxSourceSec.coerceIn(MIN_REEL_DURATION_SECONDS, 180L)
+        sourceVideoDurationSeconds = safeSourceSec
+        val (clampedStartMs, clampedEndMs) = clampReelVideoTrimWindow(
+            rawStartMs = rawStartSec * 1000L,
+            rawEndMs = rawEndSec * 1000L,
+            sourceDurationMs = safeSourceSec * 1000L
+        )
+        val newStartSec = (clampedStartMs / 1000L).coerceAtLeast(0L)
+        val newEndSec = (clampedEndMs / 1000L).coerceAtLeast(newStartSec + MIN_REEL_DURATION_SECONDS)
+        videoTrimStartSeconds = newStartSec
+        videoTrimEndSeconds = newEndSec
+        val newClipSec = (newEndSec - newStartSec).coerceIn(MIN_REEL_DURATION_SECONDS, MAX_REEL_DURATION_SECONDS)
+        reelDurationSeconds = newClipSec
+        attachedMusicTrack?.let { track ->
+            val overlaid = overlayMusicTrackOnReelVideo(track, newClipSec, track.trimStartMs)
+            attachedMusicTrack = overlaid
+            audioPlayer.updateTrimWindow(overlaid.trimStartMs, overlaid.trimEndMs)
+        }
+    }
+
+    val inspectAndAttachVideoUri = { uri: Uri, fallbackDurationSec: Long ->
+        val detectedSec = inspectVideoDurationSeconds(context, uri, fallbackDurationSec)
+        val initialClipEnd = detectedSec.coerceIn(MIN_REEL_DURATION_SECONDS, MAX_REEL_DURATION_SECONDS)
+        updateVideoTrimBounds(0L, initialClipEnd, detectedSec.coerceAtLeast(initialClipEnd))
+        mediaUrls.clear()
+        mediaUrls.add(uri.toString())
+    }
 
     val filterPresets = remember {
         listOf(
@@ -1168,6 +1348,9 @@ fun CreateContentScreen(
             }
             if (selectedTab == 0) {
                 mediaUrls.add(uri.toString())
+            } else if (selectedTab == 2) {
+                inspectAndAttachVideoUri(uri, 60L)
+                permissionMessage = "Loaded video for 15–60s Reel trimming (${reelDurationSeconds}s window)."
             } else {
                 mediaUrls.clear()
                 mediaUrls.add(uri.toString())
@@ -1196,6 +1379,7 @@ fun CreateContentScreen(
     var galleryAccessGranted by remember { mutableStateOf(false) }
     var showGalleryAccessPrompt by remember { mutableStateOf(false) }
     var isAiGroundingLoading by remember { mutableStateOf(false) }
+    var isPublishing by remember { mutableStateOf(false) }
 
     val openGalleryPickerNow = {
         if (selectedTab == 0) {
@@ -1214,6 +1398,19 @@ fun CreateContentScreen(
             openGalleryPickerNow()
         } else {
             showGalleryAccessPrompt = true
+        }
+    }
+
+    // Native Android System Video Camera Launcher (15-60s short-form Reel video capture)
+    val systemVideoCaptureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val videoUri = result.data?.data
+        if (result.resultCode == Activity.RESULT_OK && videoUri != null) {
+            selectedTab = 2
+            inspectAndAttachVideoUri(videoUri, 30L)
+            showReelCameraRecorderDialog = false
+            permissionMessage = "Captured short-form Reel video (${reelDurationSeconds}s)! Adjust trim handles below before publishing."
         }
     }
 
@@ -1243,9 +1440,13 @@ fun CreateContentScreen(
         hasCameraPerm = camGranted
         hasMicPerm = micGranted
         if (camGranted) {
-            takePicturePreviewLauncher.launch(null)
+            if (selectedTab == 2) {
+                showReelCameraRecorderDialog = true
+            } else {
+                takePicturePreviewLauncher.launch(null)
+            }
         } else {
-            permissionMessage = "Camera permission is required before capturing photos or Reels."
+            permissionMessage = "Camera permission is required before capturing photos or 15–60s Reels."
         }
     }
 
@@ -1564,13 +1765,44 @@ fun CreateContentScreen(
                                     state = pagerState,
                                     modifier = Modifier.fillMaxSize()
                                 ) { page ->
-                                    AsyncImage(
-                                        model = mediaUrls[page],
-                                        contentDescription = "Selected studio media",
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentScale = ContentScale.Crop,
-                                        colorFilter = activeFilter?.let { ColorFilter.colorMatrix(it) }
-                                    )
+                                    val itemUrl = mediaUrls[page]
+                                    Box(modifier = Modifier.fillMaxSize()) {
+                                        if (selectedTab == 2 && isPreviewingVideoTrim &&
+                                            (itemUrl.startsWith("content://") || itemUrl.startsWith("file://") || itemUrl.startsWith("http"))
+                                        ) {
+                                            val previewStartMs = (videoTrimStartSeconds * 1000L).toInt()
+                                            val previewEndMs = (videoTrimEndSeconds * 1000L).toInt()
+                                            AndroidView(
+                                                factory = { ctx ->
+                                                    VideoView(ctx).apply {
+                                                        setVideoURI(Uri.parse(itemUrl))
+                                                        setOnPreparedListener { mp ->
+                                                            mp.isLooping = true
+                                                            seekTo(previewStartMs)
+                                                            start()
+                                                        }
+                                                        setOnErrorListener { _, _, _ -> true }
+                                                    }
+                                                },
+                                                update = { view ->
+                                                    if (view.currentPosition < previewStartMs || view.currentPosition > previewEndMs) {
+                                                        view.seekTo(previewStartMs)
+                                                    }
+                                                    if (!view.isPlaying) {
+                                                        view.start()
+                                                    }
+                                                },
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        }
+                                        AsyncImage(
+                                            model = itemUrl,
+                                            contentDescription = "Selected studio media",
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = ContentScale.Crop,
+                                            colorFilter = activeFilter?.let { ColorFilter.colorMatrix(it) }
+                                        )
+                                    }
                                 }
 
                                 // Page indicator badge for multi-photo carousel
@@ -1617,7 +1849,7 @@ fun CreateContentScreen(
                                         text = when (selectedTab) {
                                             0 -> "POST • 4:5"
                                             1 -> "STORY • 24H"
-                                            else -> "REEL • ${reelDurationSeconds}S"
+                                            else -> "REEL • ${reelDurationSeconds}S (${formatMillisToMinSec(videoTrimStartSeconds * 1000L)}–${formatMillisToMinSec(videoTrimEndSeconds * 1000L)})"
                                         },
                                         style = MaterialTheme.typography.labelSmall,
                                         color = Color.White,
@@ -1672,12 +1904,13 @@ fun CreateContentScreen(
                                 val track = attachedMusicTrack!!
                                 Surface(
                                     shape = RoundedCornerShape(16.dp),
-                                    color = Color.Black.copy(alpha = 0.76f),
+                                    color = Color.Black.copy(alpha = 0.78f),
                                     modifier = Modifier
                                         .align(Alignment.BottomStart)
                                         .padding(12.dp)
                                         .border(1.dp, LuminaPrismGradient, RoundedCornerShape(16.dp))
                                         .clickable { showMusicBrowserSheet = true }
+                                        .testTag("reel_overlaid_music_badge")
                                 ) {
                                     Row(
                                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -1692,7 +1925,7 @@ fun CreateContentScreen(
                                         Spacer(modifier = Modifier.width(8.dp))
                                         Column {
                                             Text(
-                                                text = "${track.title} • ${track.artist}",
+                                                text = "♫ Overlaid: ${track.title} • ${track.artist}",
                                                 style = MaterialTheme.typography.labelMedium,
                                                 color = Color.White,
                                                 fontWeight = FontWeight.ExtraBold,
@@ -1700,7 +1933,11 @@ fun CreateContentScreen(
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                             Text(
-                                                text = "Trimmed: ${formatMillisToMinSec(track.trimStartMs)} – ${formatMillisToMinSec(track.trimEndMs)} (${track.trimmedDurationSeconds}s)",
+                                                text = if (selectedTab == 2) {
+                                                    "Synced Overlay: ${formatMillisToMinSec(track.trimStartMs)} – ${formatMillisToMinSec(track.trimEndMs)} (${track.trimmedDurationSeconds}s) • ${reelMusicOverlayMixPercent}% Music Mix"
+                                                } else {
+                                                    "Trimmed: ${formatMillisToMinSec(track.trimStartMs)} – ${formatMillisToMinSec(track.trimEndMs)} (${track.trimmedDurationSeconds}s)"
+                                                },
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = LuminaCyan
                                             )
@@ -1739,7 +1976,11 @@ fun CreateContentScreen(
                                     val micOk = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
                                         PackageManager.PERMISSION_GRANTED
                                     if (camOk && (selectedTab != 2 || micOk)) {
-                                        takePicturePreviewLauncher.launch(null)
+                                        if (selectedTab == 2) {
+                                            showReelCameraRecorderDialog = true
+                                        } else {
+                                            takePicturePreviewLauncher.launch(null)
+                                        }
                                     } else {
                                         cameraAndMicPermissionLauncher.launch(
                                             arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
@@ -1752,9 +1993,16 @@ fun CreateContentScreen(
                                 shape = RoundedCornerShape(14.dp),
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp)
                             ) {
-                                Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Icon(
+                                    imageVector = if (selectedTab == 2) Icons.Default.Videocam else Icons.Default.CameraAlt,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("Camera", fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = if (selectedTab == 2) "15-60s Cam" else "Camera",
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
 
                             OutlinedButton(
@@ -1780,6 +2028,80 @@ fun CreateContentScreen(
                                 Icon(Icons.Default.Palette, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text("Studio Art", fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        // Dedicated 15-60s Reel Camera Capture Launch Bar when on Reel Tab
+                        if (selectedTab == 2) {
+                            Surface(
+                                onClick = {
+                                    val camOk = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                                        PackageManager.PERMISSION_GRANTED
+                                    val micOk = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                                        PackageManager.PERMISSION_GRANTED
+                                    if (camOk && micOk) {
+                                        showReelCameraRecorderDialog = true
+                                    } else {
+                                        showReelCameraRecorderDialog = true
+                                        cameraAndMicPermissionLauncher.launch(
+                                            arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+                                        )
+                                    }
+                                },
+                                shape = RoundedCornerShape(16.dp),
+                                color = LuminaCoral.copy(alpha = 0.14f),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .border(1.dp, LuminaCoral.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+                                    .testTag("reel_record_video_button")
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(36.dp)
+                                                .clip(CircleShape)
+                                                .background(LuminaPrismGradient),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Videocam,
+                                                contentDescription = null,
+                                                tint = Color.White,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                        Column {
+                                            Text(
+                                                text = "Record 15–60s Short-Form Reel Video",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = "Open Reel Camera Studio • Capture 15s, 30s, 45s, or 60s video & trim clip",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        text = "Open Cam",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = LuminaCoral,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
+                                }
                             }
                         }
 
@@ -1854,6 +2176,67 @@ fun CreateContentScreen(
                         text = permissionMessage!!,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                // 1B. 15-60 SECOND REEL VIDEO TRIMMER & BACKGROUND MUSIC OVERLAY LIBRARY (MUSIC_API_KEY)
+                if (selectedTab == 2) {
+                    ReelVideoTrimmerCard(
+                        sourceDurationSeconds = sourceVideoDurationSeconds,
+                        trimStartSeconds = videoTrimStartSeconds,
+                        trimEndSeconds = videoTrimEndSeconds,
+                        trimmedDurationSeconds = reelDurationSeconds,
+                        isPreviewingTrim = isPreviewingVideoTrim,
+                        onTrimRangeChanged = { newStartSec, newEndSec ->
+                            updateVideoTrimBounds(newStartSec, newEndSec, sourceVideoDurationSeconds)
+                        },
+                        onSelectPresetDuration = { presetSec ->
+                            val targetSource = sourceVideoDurationSeconds.coerceAtLeast(presetSec)
+                            val maxStart = (targetSource - presetSec).coerceAtLeast(0L)
+                            val newStart = videoTrimStartSeconds.coerceAtMost(maxStart)
+                            updateVideoTrimBounds(newStart, newStart + presetSec, targetSource)
+                        },
+                        onTogglePreviewLoop = {
+                            isPreviewingVideoTrim = !isPreviewingVideoTrim
+                        }
+                    )
+
+                    val availableOverlayTracks = when (musicSearchState) {
+                        is UiState.Success -> musicSearchState.data.ifEmpty { fallbackOverlayTracks }
+                        else -> fallbackOverlayTracks
+                    }
+
+                    ReelBackgroundMusicOverlayCard(
+                        isMusicApiConfigured = isMusicApiConfigured,
+                        reelDurationSeconds = reelDurationSeconds,
+                        searchQuery = inlineReelMusicQuery,
+                        availableTracks = availableOverlayTracks,
+                        attachedTrack = attachedMusicTrack,
+                        overlayMixPercent = reelMusicOverlayMixPercent,
+                        onSearchQueryChange = { newQuery ->
+                            inlineReelMusicQuery = newQuery
+                            onSearchMusic(newQuery, "Indian Hits")
+                        },
+                        onSelectTrackToOverlay = { chosenTrack ->
+                            val overlaid = overlayMusicTrackOnReelVideo(
+                                track = chosenTrack,
+                                reelDurationSeconds = reelDurationSeconds,
+                                startOffsetMs = 0L
+                            )
+                            attachedMusicTrack = overlaid
+                            audioPlayer.previewWhileTrimming(
+                                overlaid.audioUrl,
+                                overlaid.trimStartMs,
+                                overlaid.trimEndMs
+                            )
+                            permissionMessage = "♫ Overlaid \"${overlaid.title}\" (${overlaid.trimmedDurationSeconds}s) onto your ${reelDurationSeconds}s Reel video."
+                        },
+                        onOverlayMixChange = { mix ->
+                            reelMusicOverlayMixPercent = mix
+                        },
+                        onOpenFullMusicLibrary = {
+                            showMusicBrowserSheet = true
+                        }
                     )
                 }
 
@@ -2137,8 +2520,10 @@ fun CreateContentScreen(
                                 }
 
                                 LuminaGradientButton(
-                                    text = "Publish Post",
+                                    text = if (isPublishing) "Publishing Post..." else "Publish Post",
                                     onClick = {
+                                        if (isPublishing) return@LuminaGradientButton
+                                        isPublishing = true
                                         audioPlayer.pause()
                                         val finalUrls = if (mediaUrls.isNotEmpty()) {
                                             mediaUrls.toList()
@@ -2168,7 +2553,7 @@ fun CreateContentScreen(
                                             attachedMusicTrack
                                         )
                                     },
-                                    enabled = caption.isNotBlank() || mediaUrls.isNotEmpty() || attachedMusicTrack != null,
+                                    enabled = !isPublishing && (caption.isNotBlank() || mediaUrls.isNotEmpty() || attachedMusicTrack != null),
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .testTag("publish_post_submit_button")
@@ -2220,8 +2605,10 @@ fun CreateContentScreen(
                                 }
 
                                 LuminaGradientButton(
-                                    text = "Share 24h Story",
+                                    text = if (isPublishing) "Sharing Story..." else "Share 24h Story",
                                     onClick = {
+                                        if (isPublishing) return@LuminaGradientButton
+                                        isPublishing = true
                                         audioPlayer.pause()
                                         val url = mediaUrls.firstOrNull() ?: generateStudioCanvasBackdropUri(
                                             context = context,
@@ -2240,7 +2627,7 @@ fun CreateContentScreen(
                                             taggedUsernamesList.toList()
                                         )
                                     },
-                                    enabled = mediaUrls.isNotEmpty() || storyOverlayText.isNotBlank() || caption.isNotBlank() || attachedMusicTrack != null,
+                                    enabled = !isPublishing && (mediaUrls.isNotEmpty() || storyOverlayText.isNotBlank() || caption.isNotBlank() || attachedMusicTrack != null),
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .testTag("publish_story_submit_button")
@@ -2248,7 +2635,7 @@ fun CreateContentScreen(
                             }
 
                             2 -> {
-                                // REEL OPTIONS (Length Slider synchronized with Music Trimmer!)
+                                // REEL OPTIONS (15-60s Length Slider synchronized with Video & Music Trimmer!)
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
@@ -2256,32 +2643,28 @@ fun CreateContentScreen(
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Text(
-                                            text = "Reel Duration & Music Trim Sync",
+                                            text = "Reel Duration (15–60s) & Audio Sync",
                                             style = MaterialTheme.typography.labelLarge,
                                             fontWeight = FontWeight.Bold
                                         )
                                         Text(
-                                            text = "${reelDurationSeconds}s",
-                                            style = MaterialTheme.typography.titleMedium,
+                                            text = "${reelDurationSeconds}s (${formatMillisToMinSec(videoTrimStartSeconds * 1000L)}–${formatMillisToMinSec(videoTrimEndSeconds * 1000L)})",
+                                            style = MaterialTheme.typography.titleSmall,
                                             color = MaterialTheme.colorScheme.primary,
                                             fontWeight = FontWeight.ExtraBold
                                         )
                                     }
 
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        listOf(10L, 15L, 30L, 60L).forEach { sec ->
+                                        listOf(15L, 30L, 45L, 60L).forEach { sec ->
                                             LuminaPillChip(
                                                 label = "${sec}s Reel",
                                                 selected = reelDurationSeconds == sec,
                                                 onClick = {
-                                                    reelDurationSeconds = sec
-                                                    attachedMusicTrack?.let { track ->
-                                                        val desiredMs = (sec * 1000L).coerceAtMost(track.durationMs)
-                                                        val newStart = track.trimStartMs.coerceAtMost((track.durationMs - desiredMs).coerceAtLeast(0L))
-                                                        val newEnd = (newStart + desiredMs).coerceAtMost(track.durationMs)
-                                                        attachedMusicTrack = track.copy(trimStartMs = newStart, trimEndMs = newEnd)
-                                                        audioPlayer.updateTrimWindow(newStart, newEnd)
-                                                    }
+                                                    val targetSource = sourceVideoDurationSeconds.coerceAtLeast(sec)
+                                                    val maxStart = (targetSource - sec).coerceAtLeast(0L)
+                                                    val newStart = videoTrimStartSeconds.coerceAtMost(maxStart)
+                                                    updateVideoTrimBounds(newStart, newStart + sec, targetSource)
                                                 }
                                             )
                                         }
@@ -2290,23 +2673,21 @@ fun CreateContentScreen(
                                     Slider(
                                         value = reelDurationSeconds.toFloat(),
                                         onValueChange = { value ->
-                                            val sec = value.toLong().coerceIn(5L, 90L)
-                                            reelDurationSeconds = sec
-                                            attachedMusicTrack?.let { track ->
-                                                val desiredMs = (sec * 1000L).coerceAtMost(track.durationMs)
-                                                val newStart = track.trimStartMs.coerceAtMost((track.durationMs - desiredMs).coerceAtLeast(0L))
-                                                val newEnd = (newStart + desiredMs).coerceAtMost(track.durationMs)
-                                                attachedMusicTrack = track.copy(trimStartMs = newStart, trimEndMs = newEnd)
-                                                audioPlayer.updateTrimWindow(newStart, newEnd)
-                                            }
+                                            val sec = value.toLong().coerceIn(MIN_REEL_DURATION_SECONDS, MAX_REEL_DURATION_SECONDS)
+                                            val targetSource = sourceVideoDurationSeconds.coerceAtLeast(sec)
+                                            val maxStart = (targetSource - sec).coerceAtLeast(0L)
+                                            val newStart = videoTrimStartSeconds.coerceAtMost(maxStart)
+                                            updateVideoTrimBounds(newStart, newStart + sec, targetSource)
                                         },
-                                        valueRange = 5f..90f
+                                        valueRange = 15f..60f
                                     )
                                 }
 
                                 LuminaGradientButton(
-                                    text = "Publish Reel (${reelDurationSeconds}s)",
+                                    text = if (isPublishing) "Publishing Reel..." else "Publish Reel (${reelDurationSeconds}s Trimmed)",
                                     onClick = {
+                                        if (isPublishing) return@LuminaGradientButton
+                                        isPublishing = true
                                         audioPlayer.pause()
                                         val url = mediaUrls.firstOrNull() ?: generateStudioCanvasBackdropUri(
                                             context = context,
@@ -2319,13 +2700,15 @@ fun CreateContentScreen(
                                             url,
                                             caption,
                                             audioLabel,
-                                            reelDurationSeconds,
+                                            reelDurationSeconds.coerceIn(MIN_REEL_DURATION_SECONDS, MAX_REEL_DURATION_SECONDS),
                                             attachedMusicTrack,
                                             collaboratorUsernames.toList(),
-                                            taggedUsernamesList.toList()
+                                            taggedUsernamesList.toList(),
+                                            videoTrimStartSeconds * 1000L,
+                                            videoTrimEndSeconds * 1000L
                                         )
                                     },
-                                    enabled = mediaUrls.isNotEmpty() || caption.isNotBlank() || attachedMusicTrack != null,
+                                    enabled = !isPublishing && (mediaUrls.isNotEmpty() || caption.isNotBlank() || attachedMusicTrack != null),
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .testTag("publish_reel_submit_button")
@@ -2340,6 +2723,43 @@ fun CreateContentScreen(
         }
     }
 
+    if (showReelCameraRecorderDialog) {
+        ReelCameraRecorderDialog(
+            initialDurationSeconds = reelDurationSeconds.coerceIn(MIN_REEL_DURATION_SECONDS, MAX_REEL_DURATION_SECONDS),
+            attachedMusicTrack = attachedMusicTrack,
+            onSelectBackgroundMusic = {
+                showReelCameraRecorderDialog = false
+                showMusicBrowserSheet = true
+            },
+            onLaunchSystemVideoCamera = {
+                try {
+                    val videoIntent = Intent(MediaStore.ACTION_VIDEO_CAPTURE).apply {
+                        putExtra(MediaStore.EXTRA_DURATION_LIMIT, 60)
+                        putExtra(MediaStore.EXTRA_VIDEO_QUALITY, 1)
+                    }
+                    systemVideoCaptureLauncher.launch(videoIntent)
+                } catch (_: Exception) {
+                    permissionMessage = "System video recorder unavailable; using Mitr Studio Camera capture."
+                }
+            },
+            onVideoCaptured = { capturedUri, recordedSeconds, lensLabel ->
+                selectedTab = 2
+                val safeRecordedSec = recordedSeconds.coerceIn(MIN_REEL_DURATION_SECONDS, MAX_REEL_DURATION_SECONDS)
+                sourceVideoDurationSeconds = 60L
+                updateVideoTrimBounds(0L, safeRecordedSec, 60L)
+                mediaUrls.clear()
+                mediaUrls.add(capturedUri)
+                showReelCameraRecorderDialog = false
+                permissionMessage = if (attachedMusicTrack != null) {
+                    "Captured ${safeRecordedSec}s Reel ($lensLabel) with overlaid track \"${attachedMusicTrack!!.title}\"!"
+                } else {
+                    "Captured ${safeRecordedSec}s short-form Reel ($lensLabel)! Select a background music track below to overlay."
+                }
+            },
+            onDismiss = { showReelCameraRecorderDialog = false }
+        )
+    }
+
     if (showMusicBrowserSheet) {
         MusicBrowserBottomSheet(
             targetFormatLabel = targetFormatLabel,
@@ -2350,12 +2770,805 @@ fun CreateContentScreen(
             onSearchMusic = onSearchMusic,
             onToggleSaveMusic = onToggleSaveMusic,
             onConfirmTrackWithTrim = { trimmedTrack ->
-                attachedMusicTrack = trimmedTrack
                 if (selectedTab == 2) {
-                    reelDurationSeconds = trimmedTrack.trimmedDurationSeconds.coerceIn(5L, 90L)
+                    val syncedSec = trimmedTrack.trimmedDurationSeconds.coerceIn(MIN_REEL_DURATION_SECONDS, MAX_REEL_DURATION_SECONDS)
+                    val overlaid = overlayMusicTrackOnReelVideo(trimmedTrack, syncedSec, trimmedTrack.trimStartMs)
+                    attachedMusicTrack = overlaid
+                    val targetSource = sourceVideoDurationSeconds.coerceAtLeast(syncedSec)
+                    val maxStart = (targetSource - syncedSec).coerceAtLeast(0L)
+                    val newStart = videoTrimStartSeconds.coerceAtMost(maxStart)
+                    updateVideoTrimBounds(newStart, newStart + syncedSec, targetSource)
+                    permissionMessage = "♫ Overlaid \"${overlaid.title}\" (${overlaid.trimmedDurationSeconds}s) onto your Reel video."
+                } else {
+                    attachedMusicTrack = trimmedTrack
                 }
             },
             onDismiss = { showMusicBrowserSheet = false }
         )
+    }
+}
+
+private fun inspectVideoDurationSeconds(
+    context: Context,
+    uri: Uri,
+    fallbackSeconds: Long = 60L
+): Long {
+    return try {
+        val retriever = MediaMetadataRetriever()
+        retriever.setDataSource(context, uri)
+        val durationMsStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+        retriever.release()
+        val durationSec = (durationMsStr?.toLongOrNull() ?: 0L) / 1000L
+        if (durationSec >= MIN_REEL_DURATION_SECONDS) {
+            durationSec.coerceAtMost(180L)
+        } else {
+            fallbackSeconds.coerceIn(MIN_REEL_DURATION_SECONDS, 180L)
+        }
+    } catch (_: Exception) {
+        fallbackSeconds.coerceIn(MIN_REEL_DURATION_SECONDS, 180L)
+    }
+}
+
+@Composable
+private fun ReelVideoTrimmerCard(
+    sourceDurationSeconds: Long,
+    trimStartSeconds: Long,
+    trimEndSeconds: Long,
+    trimmedDurationSeconds: Long,
+    isPreviewingTrim: Boolean,
+    onTrimRangeChanged: (Long, Long) -> Unit,
+    onSelectPresetDuration: (Long) -> Unit,
+    onTogglePreviewLoop: () -> Unit
+) {
+    val safeSourceSec = sourceDurationSeconds.coerceIn(MIN_REEL_DURATION_SECONDS, 180L)
+    val startFraction = (trimStartSeconds.toFloat() / safeSourceSec.toFloat()).coerceIn(0f, 1f)
+    val endFraction = (trimEndSeconds.toFloat() / safeSourceSec.toFloat()).coerceIn(startFraction, 1f)
+
+    LuminaGlassCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("reel_video_trimmer_card"),
+        shape = RoundedCornerShape(22.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(LuminaPrismGradient),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ContentCut,
+                            contentDescription = "Trim Reel Video",
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "15–60s Reel Video Trimmer",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Text(
+                            text = "Trim Window: ${formatMillisToMinSec(trimStartSeconds * 1000L)} – ${formatMillisToMinSec(trimEndSeconds * 1000L)} • ${trimmedDurationSeconds}s clip",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.testTag("reel_video_trim_summary")
+                        )
+                    }
+                }
+
+                FilledTonalButton(
+                    onClick = onTogglePreviewLoop,
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    modifier = Modifier.testTag("reel_trim_preview_toggle")
+                ) {
+                    Icon(
+                        imageVector = if (isPreviewingTrim) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = if (isPreviewingTrim) "Looping" else "Preview",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            // Visual Frame Strip Timeline with Active Trim Window Highlight
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF0E1324))
+                    .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 6.dp, vertical = 6.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val frameCount = 15
+                    for (idx in 0 until frameCount) {
+                        val slotPosition = (idx + 0.5f) / frameCount.toFloat()
+                        val inTrimWindow = slotPosition in startFraction..endFraction
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxSize()
+                                .clip(RoundedCornerShape(5.dp))
+                                .background(
+                                    if (inTrimWindow) {
+                                        LuminaPrismGradient
+                                    } else {
+                                        Brush.verticalGradient(
+                                            listOf(
+                                                Color.White.copy(alpha = 0.12f),
+                                                Color.White.copy(alpha = 0.06f)
+                                            )
+                                        )
+                                    }
+                                )
+                        )
+                    }
+                }
+            }
+
+            // Dual-Handle RangeSlider for Start & End Trim Points (enforces 15-60s clip window)
+            RangeSlider(
+                value = trimStartSeconds.toFloat()..trimEndSeconds.toFloat(),
+                onValueChange = { range ->
+                    onTrimRangeChanged(
+                        range.start.toLong(),
+                        range.endInclusive.toLong()
+                    )
+                },
+                valueRange = 0f..safeSourceSec.toFloat(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("reel_video_trim_slider")
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Start: ${formatMillisToMinSec(trimStartSeconds * 1000L)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "Min 15s • Max 60s",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = LuminaAmber,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "End: ${formatMillisToMinSec(trimEndSeconds * 1000L)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            // Quick 15s / 30s / 45s / 60s Trim Window Presets
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(15L, 30L, 45L, 60L).forEach { sec ->
+                    LuminaPillChip(
+                        label = "${sec}s Trim",
+                        selected = trimmedDurationSeconds == sec,
+                        onClick = { onSelectPresetDuration(sec) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("reel_trim_preset_$sec")
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReelBackgroundMusicOverlayCard(
+    isMusicApiConfigured: Boolean,
+    reelDurationSeconds: Long,
+    searchQuery: String,
+    availableTracks: List<MusicTrack>,
+    attachedTrack: MusicTrack?,
+    overlayMixPercent: Int,
+    onSearchQueryChange: (String) -> Unit,
+    onSelectTrackToOverlay: (MusicTrack) -> Unit,
+    onOverlayMixChange: (Int) -> Unit,
+    onOpenFullMusicLibrary: () -> Unit
+) {
+    LuminaGlassCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("reel_music_overlay_library_card"),
+        shape = RoundedCornerShape(22.dp),
+        borderBrush = LuminaPrismGradient
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(LuminaPrismGradient),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.GraphicEq,
+                            contentDescription = "Overlay Background Music",
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "Overlay Background Music on Reel Video",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Text(
+                            text = if (isMusicApiConfigured) {
+                                "MUSIC_API_KEY Active • Select a track to overlay onto your ${reelDurationSeconds}s video"
+                            } else {
+                                "Music Library Ready • Configure MUSIC_API_KEY in AI Studio Secrets for full catalog"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (isMusicApiConfigured) LuminaEmerald else MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.testTag("reel_music_api_status_badge")
+                        )
+                    }
+                }
+
+                FilledTonalButton(
+                    onClick = onOpenFullMusicLibrary,
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    modifier = Modifier.testTag("reel_open_full_music_library_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MusicNote,
+                        contentDescription = null,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "Full Library",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            // Inline Music Library Search Bar powered by MUSIC_API_KEY
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = onSearchQueryChange,
+                placeholder = { Text("Search background music library to overlay on Reel...") },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Search,
+                        contentDescription = "Search Music Library"
+                    )
+                },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(onClick = { onSearchQueryChange("") }) {
+                            Icon(Icons.Default.Close, contentDescription = "Clear search")
+                        }
+                    }
+                },
+                singleLine = true,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("reel_inline_music_search_input")
+            )
+
+            // Horizontal Quick-Overlay Music Track Strip
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("reel_background_music_overlay_strip")
+            ) {
+                items(availableTracks.take(12), key = { it.trackId }) { track ->
+                    val isCurrentlyOverlaid = attachedTrack?.trackId == track.trackId
+                    Surface(
+                        onClick = { onSelectTrackToOverlay(track) },
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (isCurrentlyOverlaid) {
+                            LuminaCoral.copy(alpha = 0.18f)
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
+                        },
+                        modifier = Modifier
+                            .width(210.dp)
+                            .border(
+                                width = if (isCurrentlyOverlaid) 1.5.dp else 1.dp,
+                                color = if (isCurrentlyOverlaid) LuminaCoral else MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                                shape = RoundedCornerShape(16.dp)
+                            )
+                            .testTag("reel_quick_overlay_track_${track.trackId}")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape)
+                                    .background(LuminaPrismGradient),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (isCurrentlyOverlaid) Icons.Default.GraphicEq else Icons.Default.MusicNote,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = track.title,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = track.artist,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = if (isCurrentlyOverlaid) "✓ Overlaid (${reelDurationSeconds}s)" else "Tap to overlay (${reelDurationSeconds}s)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isCurrentlyOverlaid) LuminaCoral else MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Audio Overlay Mix Balance (Background Music vs. Recorded Camera Audio)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "Audio Overlay Balance:",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(
+                        100 to "100% Music",
+                        80 to "80% Music / 20% Mic",
+                        50 to "50/50 Mix"
+                    ).forEach { (mixValue, label) ->
+                        LuminaPillChip(
+                            label = label,
+                            selected = overlayMixPercent == mixValue,
+                            onClick = { onOverlayMixChange(mixValue) },
+                            modifier = Modifier.testTag("reel_music_mix_$mixValue")
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReelCameraRecorderDialog(
+    initialDurationSeconds: Long,
+    attachedMusicTrack: MusicTrack? = null,
+    onSelectBackgroundMusic: () -> Unit = {},
+    onLaunchSystemVideoCamera: () -> Unit,
+    onVideoCaptured: (capturedUri: String, recordedSeconds: Long, lensLabel: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    var targetLimitSeconds by remember {
+        mutableLongStateOf(initialDurationSeconds.coerceIn(MIN_REEL_DURATION_SECONDS, MAX_REEL_DURATION_SECONDS))
+    }
+    var isRecording by remember { mutableStateOf(false) }
+    var elapsedSeconds by remember { mutableLongStateOf(0L) }
+    var isFrontCamera by remember { mutableStateOf(false) }
+    var isFlashOn by remember { mutableStateOf(false) }
+
+    val finishStudioCapture = { finalDurationSec: Long ->
+        isRecording = false
+        val clampedSec = finalDurationSec.coerceIn(MIN_REEL_DURATION_SECONDS, MAX_REEL_DURATION_SECONDS)
+        val lensName = if (isFrontCamera) "Front Lens" else "Rear 4K Lens"
+        val musicSuffix = attachedMusicTrack?.let { " • ♫ ${it.title.take(16)}" }.orEmpty()
+        val capturedBackdropUri = generateStudioCanvasBackdropUri(
+            context = context,
+            presetIndex = if (isFrontCamera) 1 else 2,
+            headline = "Mitr ${clampedSec}s Reel • $lensName$musicSuffix"
+        )
+        onVideoCaptured(capturedBackdropUri, clampedSec, lensName)
+    }
+
+    LaunchedEffect(isRecording, targetLimitSeconds) {
+        while (isRecording) {
+            delay(1000L)
+            elapsedSeconds += 1L
+            if (elapsedSeconds >= targetLimitSeconds) {
+                finishStudioCapture(targetLimitSeconds)
+                break
+            }
+        }
+    }
+
+    Dialog(
+        onDismissRequest = {
+            isRecording = false
+            onDismiss()
+        },
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp)
+                .testTag("reel_camera_recorder_dialog"),
+            shape = RoundedCornerShape(28.dp),
+            color = Color(0xFF090D1A)
+        ) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                // Simulated Live Camera Viewfinder Backdrop with Lens & Flash lighting
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                colors = if (isFrontCamera) {
+                                    listOf(Color(0xFF1E1B4B), Color(0xFF311042), Color(0xFF090D1A))
+                                } else {
+                                    listOf(Color(0xFF0F2027), Color(0xFF203A43), Color(0xFF090D1A))
+                                }
+                            )
+                        )
+                )
+
+                // Top Camera HUD Bar: Recording Status, Lens Switch, Flash, Close + Background Music Overlay Pill
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = if (isRecording) Color(0xFFDC2626) else Color.Black.copy(alpha = 0.65f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.FiberManualRecord,
+                                    contentDescription = null,
+                                    tint = if (isRecording) Color.White else LuminaCoral,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    text = if (isRecording) {
+                                        "REC ${formatMillisToMinSec(elapsedSeconds * 1000L)} / ${formatMillisToMinSec(targetLimitSeconds * 1000L)}"
+                                    } else {
+                                        "REEL CAMERA • 15–60s"
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    modifier = Modifier.testTag("reel_camera_timer_label")
+                                )
+                            }
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            IconButton(
+                                onClick = { isFlashOn = !isFlashOn },
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White.copy(alpha = 0.16f))
+                                    .testTag("reel_camera_flash_button")
+                            ) {
+                                Icon(
+                                    imageVector = if (isFlashOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
+                                    contentDescription = "Toggle Flash",
+                                    tint = if (isFlashOn) LuminaAmber else Color.White
+                                )
+                            }
+
+                            IconButton(
+                                onClick = { isFrontCamera = !isFrontCamera },
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White.copy(alpha = 0.16f))
+                                    .testTag("reel_camera_flip_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.FlipCameraAndroid,
+                                    contentDescription = "Switch Camera Lens",
+                                    tint = Color.White
+                                )
+                            }
+
+                            IconButton(
+                                onClick = {
+                                    isRecording = false
+                                    onDismiss()
+                                },
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White.copy(alpha = 0.16f))
+                                    .testTag("reel_camera_close_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Close Camera",
+                                    tint = Color.White
+                                )
+                            }
+                        }
+                    }
+
+                    // Background Music Overlay Selector Pill inside Reel Camera Recorder
+                    Surface(
+                        onClick = onSelectBackgroundMusic,
+                        shape = RoundedCornerShape(50),
+                        color = Color.Black.copy(alpha = 0.72f),
+                        modifier = Modifier
+                            .border(1.dp, LuminaPrismGradient, RoundedCornerShape(50))
+                            .testTag("reel_camera_music_overlay_button")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MusicNote,
+                                contentDescription = "Select Background Music",
+                                tint = LuminaCoral,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = if (attachedMusicTrack != null) {
+                                    "♫ Overlaid Track: ${attachedMusicTrack.title} • ${attachedMusicTrack.artist}"
+                                } else {
+                                    "♫ Select Background Music Track to Overlay on Recorded Video"
+                                },
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+
+                    // Elapsed Recording Progress Bar with 15s minimum indicator
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(6.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.2f))
+                    ) {
+                        val progressFraction = (elapsedSeconds.toFloat() / targetLimitSeconds.toFloat()).coerceIn(0f, 1f)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(if (isRecording) progressFraction.coerceAtLeast(0.05f) else 0f)
+                                .height(6.dp)
+                                .background(LuminaPrismGradient)
+                        )
+                    }
+                }
+
+                // Center Viewfinder Guide
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(horizontal = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(92.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.08f))
+                            .border(2.dp, LuminaPrismGradient, CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Videocam,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(42.dp)
+                        )
+                    }
+                    Text(
+                        text = if (isFrontCamera) "Front Selfie Reel Camera (9:16)" else "Rear HD Reel Camera (9:16)",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color.White,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                    Text(
+                        text = "Target Length: ${targetLimitSeconds}s (Min 15s • Max 60s)\nRecord directly or use your device's system video camera, then overlay background music & trim.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.78f),
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                // Bottom Camera Controls: Duration Limit Selector (15s/30s/45s/60s) + Record Shutter + System Video Camera
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    // 15s / 30s / 45s / 60s Target Duration Selector
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(15L, 30L, 45L, 60L).forEach { sec ->
+                            LuminaPillChip(
+                                label = "${sec}s",
+                                selected = targetLimitSeconds == sec,
+                                onClick = {
+                                    if (!isRecording) {
+                                        targetLimitSeconds = sec
+                                    }
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("reel_camera_duration_$sec")
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        OutlinedButton(
+                            onClick = onLaunchSystemVideoCamera,
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.testTag("reel_system_video_camera_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CameraAlt,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("System Cam", color = Color.White, fontWeight = FontWeight.Bold)
+                        }
+
+                        // Primary Record / Stop Shutter Button
+                        Box(
+                            modifier = Modifier
+                                .size(74.dp)
+                                .clip(CircleShape)
+                                .border(4.dp, Color.White, CircleShape)
+                                .padding(6.dp)
+                                .clip(CircleShape)
+                                .background(if (isRecording) Color(0xFFDC2626) else LuminaCoral)
+                                .clickable {
+                                    if (!isRecording) {
+                                        elapsedSeconds = 0L
+                                        isRecording = true
+                                    } else {
+                                        val finalSec = elapsedSeconds.coerceAtLeast(targetLimitSeconds).coerceIn(
+                                            MIN_REEL_DURATION_SECONDS,
+                                            MAX_REEL_DURATION_SECONDS
+                                        )
+                                        finishStudioCapture(finalSec)
+                                    }
+                                }
+                                .testTag("reel_camera_shutter_button"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = if (isRecording) Icons.Default.Stop else Icons.Default.FiberManualRecord,
+                                contentDescription = if (isRecording) "Stop Recording" else "Start Recording",
+                                tint = Color.White,
+                                modifier = Modifier.size(32.dp)
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                val capturedSec = if (elapsedSeconds >= MIN_REEL_DURATION_SECONDS) {
+                                    elapsedSeconds
+                                } else {
+                                    targetLimitSeconds
+                                }
+                                finishStudioCapture(capturedSec)
+                            },
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.testTag("reel_camera_finish_button")
+                        ) {
+                            Text("Use ${targetLimitSeconds}s Clip", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
     }
 }

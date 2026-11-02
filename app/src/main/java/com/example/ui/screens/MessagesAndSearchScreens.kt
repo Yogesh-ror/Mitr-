@@ -1,6 +1,10 @@
 package com.example.ui.screens
 
+import android.content.Intent
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -26,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.filled.AddCircleOutline
+import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
@@ -78,6 +83,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import androidx.compose.material3.LinearProgressIndicator
+import com.example.data.local.MobileStorageStats
 import com.example.data.model.Conversation
 import com.example.data.model.DirectMessage
 import com.example.data.model.FirestoreFeedSearchResult
@@ -89,6 +95,9 @@ import com.example.data.model.SocialNotificationItem
 import com.example.data.model.UiState
 import com.example.data.model.UserActivityLog
 import com.example.data.model.UserProfile
+import com.example.data.model.filterAndRankUsersByQuery
+import com.example.data.model.isReadByPeer
+import com.example.data.model.isUserBlueTickVerified
 import com.example.ui.components.AuroraAmbientBackground
 import com.example.ui.components.LuminaGlassCard
 import com.example.ui.components.LuminaPillChip
@@ -154,6 +163,8 @@ fun ChatListScreen(
     onStartConversationWithUser: (UserProfile) -> Unit,
     onBlockUser: (UserProfile) -> Unit,
     onReportConversation: (String, String) -> Unit,
+    mobileStorageStats: MobileStorageStats = MobileStorageStats(),
+    onOffloadChatsToMobileStorage: () -> Unit = {},
     onOpenSearch: () -> Unit = {},
     onOpenNotifications: () -> Unit = {},
     onOpenUserProfile: (String) -> Unit = {}
@@ -183,9 +194,7 @@ fun ChatListScreen(
         val peerProfile = userById[peerUserId]
 
         LaunchedEffect(activeConversation.id, activeConversation.unreadCount) {
-            if (activeConversation.unreadCount > 0 && activeConversation.lastSenderId != currentUserId) {
-                onMarkConversationRead(activeConversation.id)
-            }
+            onMarkConversationRead(activeConversation.id)
         }
 
         IndividualChatView(
@@ -195,8 +204,11 @@ fun ChatListScreen(
             readReceiptsEnabled = readReceiptsEnabled,
             showActivityStatus = showActivityStatus,
             observeMessages = observeMessages,
-            onSendMessage = { text, replyId ->
-                onSendMessage(activeConversation, text, "", "NONE", replyId)
+            onMarkConversationRead = {
+                onMarkConversationRead(activeConversation.id)
+            },
+            onSendMessage = { text, mediaUrl, mediaType, replyId ->
+                onSendMessage(activeConversation, text, mediaUrl, mediaType, replyId)
             },
             onDeleteMessage = { msgId ->
                 onDeleteMessage(activeConversation.id, msgId)
@@ -326,6 +338,53 @@ fun ChatListScreen(
                             text = "New Chat",
                             style = MaterialTheme.typography.labelLarge,
                             color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            // Mobile Storage Offload Banner — Stores chats & non-essential logs on device SQLite to prevent Cloud DB filling
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .testTag("chat_mobile_storage_banner")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Phone Storage Active (${mobileStorageStats.localMessagesCount} msgs • ${mobileStorageStats.localActivityLogsCount} logs)",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "Chats & activity logs saved on phone storage (~${(mobileStorageStats.estimatedSavedCloudBytes / 1024L).coerceAtLeast(1L)} KB saved in Cloud DB)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    OutlinedButton(
+                        onClick = onOffloadChatsToMobileStorage,
+                        shape = RoundedCornerShape(50),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        modifier = Modifier.testTag("offload_chats_to_phone_button")
+                    ) {
+                        Text(
+                            text = "Free Cloud DB",
+                            style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -543,6 +602,27 @@ fun ChatListScreen(
                                                         modifier = Modifier.padding(horizontal = 5.dp)
                                                     )
                                                 }
+                                            } else if (conv.lastSenderId == currentUserId && readReceiptsEnabled) {
+                                                val isLastSeenByPeer = conv.unreadCount == 0L && conv.lastMessageText != "Conversation started"
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                                    modifier = Modifier.testTag("conversation_read_receipt_${conv.id}")
+                                                ) {
+                                                    Icon(
+                                                        imageVector = if (isLastSeenByPeer) Icons.Default.DoneAll else Icons.Default.Check,
+                                                        contentDescription = if (isLastSeenByPeer) "Seen" else "Sent",
+                                                        tint = if (isLastSeenByPeer) LuminaEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        modifier = Modifier.size(14.dp)
+                                                    )
+                                                    Text(
+                                                        text = if (isLastSeenByPeer) "Seen" else "Sent",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = if (isLastSeenByPeer) LuminaEmerald else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        fontWeight = if (isLastSeenByPeer) FontWeight.Bold else FontWeight.Normal
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -637,6 +717,8 @@ fun MessagesScreen(
     onStartConversationWithUser: (UserProfile) -> Unit,
     onBlockUser: (UserProfile) -> Unit,
     onReportConversation: (String, String) -> Unit,
+    mobileStorageStats: MobileStorageStats = MobileStorageStats(),
+    onOffloadChatsToMobileStorage: () -> Unit = {},
     onOpenSearch: () -> Unit = {},
     onOpenNotifications: () -> Unit = {},
     onOpenUserProfile: (String) -> Unit = {}
@@ -659,6 +741,8 @@ fun MessagesScreen(
         onStartConversationWithUser = onStartConversationWithUser,
         onBlockUser = onBlockUser,
         onReportConversation = onReportConversation,
+        mobileStorageStats = mobileStorageStats,
+        onOffloadChatsToMobileStorage = onOffloadChatsToMobileStorage,
         onOpenSearch = onOpenSearch,
         onOpenNotifications = onOpenNotifications,
         onOpenUserProfile = onOpenUserProfile
@@ -673,7 +757,8 @@ private fun IndividualChatView(
     readReceiptsEnabled: Boolean,
     showActivityStatus: Boolean,
     observeMessages: (String) -> Flow<List<DirectMessage>>,
-    onSendMessage: (String, String) -> Unit,
+    onMarkConversationRead: () -> Unit = {},
+    onSendMessage: (String, String, String, String) -> Unit,
     onDeleteMessage: (String) -> Unit,
     onAcceptOrDeclineRequest: (Boolean) -> Unit,
     onReport: (String) -> Unit,
@@ -682,13 +767,43 @@ private fun IndividualChatView(
 ) {
     BackHandler { onBack() }
 
+    val context = androidx.compose.ui.platform.LocalContext.current
     val messages by observeMessages(conversation.id).collectAsState(initial = emptyList())
     val listState = rememberLazyListState()
     var inputText by remember { mutableStateOf("") }
+    var attachedMediaUrl by remember { mutableStateOf("") }
     var searchInChat by remember { mutableStateOf("") }
     var isSearching by remember { mutableStateOf(false) }
     var replyingToMsg by remember { mutableStateOf<DirectMessage?>(null) }
     var showReportDialog by remember { mutableStateOf(false) }
+
+    val chatMediaPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) {
+            }
+            attachedMediaUrl = uri.toString()
+        }
+    }
+
+    // Automatically mark incoming messages as READ in Firestore in real time whenever viewing the chat
+    val hasUnreadIncomingMessages = remember(messages, currentUserId) {
+        messages.any { msg ->
+            msg.senderId != currentUserId &&
+                (!msg.deliveryStatus.equals("READ", ignoreCase = true) || !msg.readByUids.contains(currentUserId))
+        }
+    }
+    LaunchedEffect(conversation.id, messages.size, hasUnreadIncomingMessages, readReceiptsEnabled) {
+        if (hasUnreadIncomingMessages || (conversation.unreadCount > 0L && conversation.lastSenderId != currentUserId)) {
+            onMarkConversationRead()
+        }
+    }
 
     val filteredMessages = remember(messages, searchInChat) {
         if (searchInChat.isBlank()) messages
@@ -972,15 +1087,51 @@ private fun IndividualChatView(
                                             modifier = Modifier.testTag("chat_message_timestamp_${msg.id}")
                                         )
                                         if (isMine && readReceiptsEnabled) {
-                                            Icon(
-                                                imageVector = Icons.Default.DoneAll,
-                                                contentDescription = msg.deliveryStatus,
-                                                tint = Color.White,
-                                                modifier = Modifier.size(14.dp)
-                                            )
+                                            val isSeen = msg.isReadByPeer(currentUserId)
+                                            val isDelivered = msg.deliveryStatus.equals("DELIVERED", ignoreCase = true)
+                                            val receiptLabel = when {
+                                                isSeen -> "Seen"
+                                                isDelivered -> "Delivered"
+                                                else -> "Sent"
+                                            }
+                                            val receiptTint = if (isSeen) {
+                                                Color(0xFFA7F3D0)
+                                            } else {
+                                                Color.White.copy(alpha = 0.88f)
+                                            }
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                                modifier = Modifier.testTag("chat_read_receipt_${msg.id}")
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (isSeen || isDelivered) Icons.Default.DoneAll else Icons.Default.Check,
+                                                    contentDescription = receiptLabel,
+                                                    tint = receiptTint,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                                Text(
+                                                    text = receiptLabel,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = receiptTint,
+                                                    fontWeight = if (isSeen) FontWeight.ExtraBold else FontWeight.Medium
+                                                )
+                                            }
                                         }
                                     }
                                 }
+                            }
+                            if (isMine && readReceiptsEnabled && msg.id == filteredMessages.lastOrNull()?.id && msg.isReadByPeer(currentUserId)) {
+                                val peerHandle = peerProfile?.username?.takeIf { it.isNotBlank() }?.let { "@$it" } ?: "recipient"
+                                Text(
+                                    text = "✓✓ Seen by $peerHandle",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = LuminaEmerald,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier
+                                        .padding(top = 3.dp, end = 4.dp)
+                                        .testTag("chat_thread_seen_indicator")
+                                )
                             }
                             Row {
                                 TextButton(onClick = { replyingToMsg = msg }) {
@@ -1023,10 +1174,91 @@ private fun IndividualChatView(
                             }
                         }
                     }
+
+                    if (attachedMediaUrl.isNotBlank()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                AsyncImage(
+                                    model = attachedMediaUrl,
+                                    contentDescription = "Attached media preview",
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .clip(RoundedCornerShape(10.dp)),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Text(
+                                    text = "Media attached to message",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            IconButton(onClick = { attachedMediaUrl = "" }) {
+                                Icon(Icons.Default.Close, contentDescription = "Remove Media", modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+
+                    // Quick Instant Emoji Reactions Row
+                    LazyRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 6.dp)
+                            .testTag("chat_quick_emoji_row"),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(listOf("❤️", "🔥", "😂", "👏", "🙏", "✨")) { emoji ->
+                            Surface(
+                                onClick = {
+                                    onSendMessage(emoji, "", "NONE", replyingToMsg?.id ?: "")
+                                    replyingToMsg = null
+                                },
+                                shape = RoundedCornerShape(50),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                                modifier = Modifier.testTag("chat_quick_emoji_$emoji")
+                            ) {
+                                Text(
+                                    text = emoji,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                    }
+
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.fillMaxWidth()
                     ) {
+                        IconButton(
+                            onClick = {
+                                chatMediaPickerLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                )
+                            },
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .testTag("chat_attach_media_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AddPhotoAlternate,
+                                contentDescription = "Attach Photo",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
                         OutlinedTextField(
                             value = inputText,
                             onValueChange = { inputText = it.take(1800) },
@@ -1040,9 +1272,17 @@ private fun IndividualChatView(
                         Spacer(modifier = Modifier.width(10.dp))
                         IconButton(
                             onClick = {
-                                if (inputText.isNotBlank()) {
-                                    onSendMessage(inputText, replyingToMsg?.id ?: "")
+                                if (inputText.isNotBlank() || attachedMediaUrl.isNotBlank()) {
+                                    val finalMediaType = if (attachedMediaUrl.isNotBlank()) "IMAGE" else "NONE"
+                                    val finalText = inputText.ifBlank { "Shared a photo" }
+                                    onSendMessage(
+                                        finalText,
+                                        attachedMediaUrl,
+                                        finalMediaType,
+                                        replyingToMsg?.id ?: ""
+                                    )
                                     inputText = ""
+                                    attachedMediaUrl = ""
                                     replyingToMsg = null
                                 }
                             },
@@ -1205,7 +1445,7 @@ fun NotificationScreen(
             }
             item {
                 LuminaPillChip(
-                    label = "Likes ($likesCount)",
+                    label = "Likes & Reactions ($likesCount)",
                     selected = selectedCategory == NotificationCategory.LIKES,
                     leadingIcon = Icons.Default.Favorite,
                     onClick = { selectedCategory = NotificationCategory.LIKES },
@@ -1579,69 +1819,46 @@ fun SearchAndDiscoveryScreen(
 
     val matchingUsers = remember(discoverableUsers, firestoreSearchResult, posts, reels, cleanQuery) {
         val byId = LinkedHashMap<String, UserProfile>()
-        if (cleanQuery.isBlank()) {
-            discoverableUsers.forEach { u ->
-                val uid = u.userId.ifBlank { u.id }
-                if (uid.isNotBlank()) byId[uid] = u.copy(id = uid, userId = uid)
-            }
-        } else {
-            firestoreSearchResult.matchedUsers.forEach { u ->
-                val uid = u.userId.ifBlank { u.id }
-                if (uid.isNotBlank() && (
-                        u.username.contains(cleanQuery, ignoreCase = true) ||
-                            u.displayName.contains(cleanQuery, ignoreCase = true) ||
-                            u.bio.contains(cleanQuery, ignoreCase = true) ||
-                            u.userId.equals(cleanQuery, ignoreCase = true)
-                        )
-                ) {
-                    byId[uid] = u.copy(id = uid, userId = uid)
-                }
-            }
-            discoverableUsers.forEach { u ->
-                val uid = u.userId.ifBlank { u.id }
-                if (uid.isNotBlank() && !byId.containsKey(uid) && (
-                        u.username.contains(cleanQuery, ignoreCase = true) ||
-                            u.displayName.contains(cleanQuery, ignoreCase = true) ||
-                            u.bio.contains(cleanQuery, ignoreCase = true) ||
-                            u.userId.equals(cleanQuery, ignoreCase = true)
-                        )
-                ) {
-                    byId[uid] = u.copy(id = uid, userId = uid)
-                }
-            }
-            posts.forEach { p ->
-                val uid = p.authorId
-                if (uid.isNotBlank() && !byId.containsKey(uid) && (
-                        p.authorUsername.contains(cleanQuery, ignoreCase = true) ||
-                            p.authorDisplayName.contains(cleanQuery, ignoreCase = true)
-                        )
-                ) {
-                    val uname = p.authorUsername.ifBlank { "user_${uid.take(6)}" }
-                    byId[uid] = UserProfile(
-                        id = uid,
-                        userId = uid,
-                        username = uname,
-                        displayName = p.authorDisplayName.ifBlank { uname },
-                        avatarUrl = p.authorAvatarUrl,
-                        bio = "Creator on Mitr"
-                    )
-                }
-            }
-            reels.forEach { r ->
-                val uid = r.authorId
-                if (uid.isNotBlank() && !byId.containsKey(uid) && r.authorUsername.contains(cleanQuery, ignoreCase = true)) {
-                    val uname = r.authorUsername.ifBlank { "user_${uid.take(6)}" }
-                    byId[uid] = UserProfile(
-                        id = uid,
-                        userId = uid,
-                        username = uname,
-                        displayName = uname,
-                        bio = "Creator on Mitr"
-                    )
-                }
+        firestoreSearchResult.matchedUsers.forEach { u ->
+            val uid = u.userId.ifBlank { u.id }
+            if (uid.isNotBlank()) {
+                byId[uid] = u.copy(id = uid, userId = uid)
             }
         }
-        byId.values.toList()
+        discoverableUsers.forEach { u ->
+            val uid = u.userId.ifBlank { u.id }
+            if (uid.isNotBlank() && !byId.containsKey(uid)) {
+                byId[uid] = u.copy(id = uid, userId = uid)
+            }
+        }
+        posts.forEach { p ->
+            val uid = p.authorId
+            if (uid.isNotBlank() && !byId.containsKey(uid)) {
+                val uname = p.authorUsername.ifBlank { "user_${uid.take(6)}" }
+                byId[uid] = UserProfile(
+                    id = uid,
+                    userId = uid,
+                    username = uname,
+                    displayName = p.authorDisplayName.ifBlank { uname },
+                    avatarUrl = p.authorAvatarUrl,
+                    bio = "Creator on Mitr"
+                )
+            }
+        }
+        reels.forEach { r ->
+            val uid = r.authorId
+            if (uid.isNotBlank() && !byId.containsKey(uid)) {
+                val uname = r.authorUsername.ifBlank { "user_${uid.take(6)}" }
+                byId[uid] = UserProfile(
+                    id = uid,
+                    userId = uid,
+                    username = uname,
+                    displayName = r.authorDisplayName.ifBlank { uname },
+                    bio = "Creator on Mitr"
+                )
+            }
+        }
+        filterAndRankUsersByQuery(byId.values.toList(), cleanQuery)
     }
 
     val matchingHashtags = remember(posts, firestoreSearchResult, cleanQuery) {
@@ -1709,7 +1926,7 @@ fun SearchAndDiscoveryScreen(
                     query = it
                     onExecuteFirestoreSearch(it)
                 },
-                placeholder = { Text("Search @usernames, #hashtags, or post content...") },
+                placeholder = { Text("Search users by @username or display name, #hashtags...") },
                 leadingIcon = {
                     Icon(
                         Icons.Default.Search,
@@ -1832,19 +2049,35 @@ fun SearchAndDiscoveryScreen(
                     }
                 }
 
-                // Accounts Section
+                // Accounts Section (Firestore query by username or display name)
                 if (filterCategory == "ALL" || filterCategory == "ACCOUNTS") {
                     item {
-                        Text(
-                            text = "Accounts (${matchingUsers.size})",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.ExtraBold
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (cleanQuery.isBlank()) {
+                                    "Suggested Accounts (${matchingUsers.size})"
+                                } else {
+                                    "Matching Users (${matchingUsers.size})"
+                                },
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                            Text(
+                                text = "Firestore Live Search",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                     if (matchingUsers.isEmpty()) {
                         item {
                             Text(
-                                text = "No matching accounts found.",
+                                text = "No users found matching \"$cleanQuery\" by username or display name.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1853,10 +2086,12 @@ fun SearchAndDiscoveryScreen(
                         items(matchingUsers, key = { it.userId.ifBlank { it.id.ifBlank { it.username } } }) { user ->
                             val targetUid = user.userId.ifBlank { user.id.ifBlank { user.username } }
                             val followRecord = outgoingFollows.find { it.followingId == targetUid }
+                            val isVerifiedUser = isUserBlueTickVerified(user)
                             LuminaGlassCard(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable { onOpenUserProfile(targetUid) },
+                                    .clickable { onOpenUserProfile(targetUid) }
+                                    .testTag("search_user_card_$targetUid"),
                                 shape = RoundedCornerShape(18.dp)
                             ) {
                                 Row(
@@ -1873,22 +2108,38 @@ fun SearchAndDiscoveryScreen(
                                         UserAvatarBadge(
                                             avatarUrl = user.avatarUrl,
                                             displayName = user.displayName,
-                                            size = 46.dp,
+                                            size = 48.dp,
                                             showBorder = true
                                         )
                                         Spacer(modifier = Modifier.width(12.dp))
-                                        Column {
-                                            Text(
-                                                text = user.displayName,
-                                                style = MaterialTheme.typography.titleSmall,
-                                                fontWeight = FontWeight.Bold,
-                                                color = MaterialTheme.colorScheme.onSurface
-                                            )
+                                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(
+                                                    text = user.displayName.ifBlank { user.username },
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                                if (isVerifiedUser) {
+                                                    Spacer(modifier = Modifier.width(5.dp))
+                                                    VerifiedBadgeIcon(size = 15.dp)
+                                                }
+                                            }
                                             Text(
                                                 text = "@${user.username}",
                                                 style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = MaterialTheme.colorScheme.primary
                                             )
+                                            if (user.bio.isNotBlank()) {
+                                                Text(
+                                                    text = user.bio,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
                                         }
                                     }
                                     if (user.userId != currentUserId) {

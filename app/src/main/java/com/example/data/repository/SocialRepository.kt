@@ -18,13 +18,25 @@ import com.example.data.model.Post
 import com.example.data.model.Reel
 import com.example.data.model.SavedMusic
 import com.example.data.model.SavedPost
+import com.example.data.model.SavedReel
 import com.example.data.model.Story
+import com.example.data.local.LocalActivityLogEntity
+import com.example.data.local.MitrLocalDao
+import com.example.data.local.MitrLocalDatabase
+import com.example.data.local.MobileStorageStats
+import com.example.data.local.toLocalEntity
+import com.example.data.model.StoryReaction
 import com.example.data.model.UserActivityLog
 import com.example.data.model.UserProfile
 import com.example.data.model.UserRelation
 import com.example.data.model.UserSettings
+import com.example.data.model.filterAndRankUsersByQuery
+import com.example.data.model.filterRecentPublicPostsForProfile
+import com.example.data.model.filterUserReelsForProfile
 import com.example.data.model.isFounderVipAccount
 import com.example.data.model.isUserBlueTickVerified
+import com.example.data.model.storyCreatedMillis
+import com.example.data.model.storyFeelingLabelForEmoji
 import com.google.firebase.Firebase
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
@@ -37,8 +49,10 @@ import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 import org.json.JSONArray
@@ -78,12 +92,15 @@ fun handleFirestoreError(exception: Exception, operationType: OperationType, pat
 
 class SocialRepository(
     private val db: FirebaseFirestore,
-    private val auth: FirebaseAuth = Firebase.auth
+    private val auth: FirebaseAuth = Firebase.auth,
+    private val localDao: MitrLocalDao? = null
 ) {
     constructor(context: Context) : this(
-        FirebaseFirestore.getInstance(
+        db = FirebaseFirestore.getInstance(
             context.applicationContext.getString(R.string.firestore_database_id)
-        )
+        ),
+        auth = Firebase.auth,
+        localDao = MitrLocalDatabase.getInstance(context.applicationContext).mitrLocalDao()
     )
 
     private fun requireUserId(): String {
@@ -118,6 +135,88 @@ class SocialRepository(
         )
     }
 
+    data class FirestoreDiagnosticReport(
+        val isAuthenticated: Boolean,
+        val currentUid: String?,
+        val currentEmail: String?,
+        val usersReadAllowed: Boolean,
+        val postsReadAllowed: Boolean,
+        val reelsReadAllowed: Boolean,
+        val connectionHealthy: Boolean,
+        val diagnosticMessage: String
+    )
+
+    /**
+     * Diagnostic utility function that verifies Firestore security rules, authentication state,
+     * and collection read access for /users, /posts, and /reels.
+     */
+    suspend fun verifyFirestoreConnectionAndRules(): Result<FirestoreDiagnosticReport> = runCatching {
+        val currentUser = auth.currentUser
+        val uid = currentUser?.uid
+        val email = currentUser?.email
+        if (uid.isNullOrBlank()) {
+            val report = FirestoreDiagnosticReport(
+                isAuthenticated = false,
+                currentUid = null,
+                currentEmail = null,
+                usersReadAllowed = false,
+                postsReadAllowed = false,
+                reelsReadAllowed = false,
+                connectionHealthy = false,
+                diagnosticMessage = "User is not authenticated with Firebase Auth."
+            )
+            Log.w("FirestoreDiagnostics", report.diagnosticMessage)
+            return@runCatching report
+        }
+
+        var usersOk = false
+        var postsOk = false
+        var reelsOk = false
+        val errorNotes = mutableListOf<String>()
+
+        try {
+            db.collection("users").limit(1).get().await()
+            usersOk = true
+        } catch (e: Exception) {
+            errorNotes.add("users: ${e.message}")
+            Log.e("FirestoreDiagnostics", "Security rules / connection check failed on 'users' for uid=$uid", e)
+        }
+
+        try {
+            db.collection("posts").limit(1).get().await()
+            postsOk = true
+        } catch (e: Exception) {
+            errorNotes.add("posts: ${e.message}")
+            Log.e("FirestoreDiagnostics", "Security rules / connection check failed on 'posts' for uid=$uid", e)
+        }
+
+        try {
+            db.collection("reels").limit(1).get().await()
+            reelsOk = true
+        } catch (e: Exception) {
+            errorNotes.add("reels: ${e.message}")
+            Log.e("FirestoreDiagnostics", "Security rules / connection check failed on 'reels' for uid=$uid", e)
+        }
+
+        val healthy = usersOk && postsOk && reelsOk
+        val summary = if (healthy) {
+            "Firestore connection & security rules verified (uid=$uid, users=OK, posts=OK, reels=OK)"
+        } else {
+            "Firestore diagnostic issues detected (uid=$uid): ${errorNotes.joinToString("; ")}"
+        }
+        Log.i("FirestoreDiagnostics", summary)
+        FirestoreDiagnosticReport(
+            isAuthenticated = true,
+            currentUid = uid,
+            currentEmail = email,
+            usersReadAllowed = usersOk,
+            postsReadAllowed = postsOk,
+            reelsReadAllowed = reelsOk,
+            connectionHealthy = healthy,
+            diagnosticMessage = summary
+        )
+    }
+
     fun observeCurrentUserProfile(): Flow<UserProfile?> = flow {
         val uid = requireUserId()
         val path = "users/$uid"
@@ -130,6 +229,31 @@ class SocialRepository(
                 .catch { error ->
                     if (error is Exception) handleFirestoreError(error, OperationType.GET, path)
                     throw error
+                }
+        )
+    }
+
+    /**
+     * Real-time stream of any user's profile document from `/users/{targetUserId}` with fallback resolution
+     * so navigating to another user's ID always displays their live profile data instead of a placeholder.
+     */
+    fun observeUserProfileById(targetUserId: String): Flow<UserProfile?> = flow {
+        requireUserId()
+        val cleanId = targetUserId.trim().removePrefix("@")
+        if (cleanId.isBlank()) {
+            emit(null)
+            return@flow
+        }
+        val path = "users/$cleanId"
+        emitAll(
+            db.collection("users").document(cleanId)
+                .snapshots()
+                .map { snapshot ->
+                    snapshot.toNormalizedUserProfile() ?: resolveUserProfile(cleanId).getOrNull()
+                }
+                .catch { error ->
+                    if (error is Exception) handleFirestoreError(error, OperationType.GET, path)
+                    emit(resolveUserProfile(cleanId).getOrNull())
                 }
         )
     }
@@ -506,42 +630,67 @@ class SocialRepository(
     fun observePublicFeedPosts(): Flow<List<Post>> = flow {
         val uid = requireUserId()
         val path = "posts"
-        emitAll(
-            db.collection("posts")
+        try {
+            val feedFlow = db.collection("posts")
                 .snapshots()
                 .map { snap ->
-                    snap.documents.mapNotNull { doc ->
-                        runCatching {
-                            doc.toObject(Post::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                                ?.copy(id = doc.id)
-                        }.getOrNull()
+                    try {
+                        snap.documents.mapNotNull { doc ->
+                            try {
+                                doc.toObject(Post::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                                    ?.copy(id = doc.id)
+                            } catch (docErr: Exception) {
+                                Log.w("FirestoreFeedSync", "Skipping malformed post doc id=${doc.id}: ${docErr.message}")
+                                null
+                            }
+                        }
+                            .filter { it.visibility.isBlank() || it.visibility == "PUBLIC" || it.authorId == uid }
+                            .distinctBy { it.id }
+                            .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                    } catch (mapErr: Exception) {
+                        Log.e("FirestoreFeedSync", "Error mapping feed query snapshot (uid=$uid, path=$path): ${mapErr.message}", mapErr)
+                        emptyList()
                     }
-                        .filter { it.visibility.isBlank() || it.visibility == "PUBLIC" || it.authorId == uid }
-                        .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
                 }
                 .catch { error ->
+                    Log.e(
+                        "FirestoreFeedSync",
+                        "Feed query snapshot listener error (uid=$uid, path=$path, type=${error::class.java.simpleName}): ${error.message}",
+                        error
+                    )
                     if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
                     emit(emptyList())
                 }
-        )
+            emitAll(feedFlow)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e("FirestoreFeedSync", "Failed to initialize feed query snapshot listener (uid=$uid, path=$path): ${e.message}", e)
+            handleFirestoreError(e, OperationType.LIST, path)
+            emit(emptyList())
+        }
     }
 
-    fun observeUserPosts(authorId: String): Flow<List<Post>> = flow {
+    fun observeUserPosts(authorId: String, authorUsername: String = ""): Flow<List<Post>> = flow {
         val uid = requireUserId()
+        val cleanUsername = authorUsername.trim().removePrefix("@")
         val path = "posts"
         emitAll(
             db.collection("posts")
-                .whereEqualTo("authorId", authorId)
                 .snapshots()
                 .map { snap ->
-                    snap.documents.mapNotNull { doc ->
+                    val allDocs = snap.documents.mapNotNull { doc ->
                         runCatching {
                             doc.toObject(Post::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                                 ?.copy(id = doc.id)
                         }.getOrNull()
                     }
-                        .filter { authorId == uid || it.visibility.isBlank() || it.visibility == "PUBLIC" }
-                        .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                    filterRecentPublicPostsForProfile(
+                        posts = allDocs,
+                        userId = authorId,
+                        username = cleanUsername,
+                        isOwner = authorId == uid
+                    )
                 }
                 .catch { error ->
                     if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
@@ -871,23 +1020,71 @@ class SocialRepository(
         }
     }
 
-    // --- 4. Saved Posts & Saved Music ---
+    // --- 4. Saved Posts, Saved Reels & Saved Music ---
+
+    fun observeSavedReels(): Flow<List<SavedReel>> = flow {
+        val uid = requireUserId()
+        val path = "users/$uid/saved_reels"
+        emitAll(
+            db.collection("users")
+                .document(uid)
+                .collection("saved_reels")
+                .snapshots()
+                .map { snap ->
+                    snap.documents.mapNotNull { doc ->
+                        runCatching {
+                            doc.toObject(SavedReel::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                                ?.copy(
+                                    id = doc.id,
+                                    reelId = (doc.getString("reelId") ?: doc.id).ifBlank { doc.id }
+                                )
+                        }.getOrNull()
+                    }.sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                }
+                .catch { error ->
+                    if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
+                    emit(emptyList())
+                }
+        )
+    }
 
     fun observeSavedPosts(): Flow<List<SavedPost>> = flow {
         val uid = requireUserId()
         val path = "saved_posts"
+        val savedPostsFlow = db.collection("saved_posts")
+            .whereEqualTo("userId", uid)
+            .snapshots()
+            .map { snap ->
+                snap.toObjects(SavedPost::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            }
+            .catch { error ->
+                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
+                emit(emptyList())
+            }
+
+        val savedReelsSubFlow = observeSavedReels().catch { emit(emptyList()) }
+
         emitAll(
-            db.collection("saved_posts")
-                .whereEqualTo("userId", uid)
-                .snapshots()
-                .map { snap ->
-                    snap.toObjects(SavedPost::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                        .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+            combine(savedPostsFlow, savedReelsSubFlow) { savedPosts, savedReels ->
+                val merged = LinkedHashMap<String, SavedPost>()
+                savedPosts.forEach { item ->
+                    val key = item.postId.ifBlank { item.reelId }.ifBlank { item.id }
+                    if (key.isNotBlank()) {
+                        merged[key] = if (item.targetType == "REEL" && item.reelId.isBlank()) {
+                            item.copy(reelId = item.postId)
+                        } else {
+                            item
+                        }
+                    }
                 }
-                .catch { error ->
-                    if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                    throw error
+                savedReels.forEach { reelDoc ->
+                    val key = reelDoc.reelId.ifBlank { reelDoc.postId }.ifBlank { reelDoc.id }
+                    if (key.isNotBlank() && !merged.containsKey(key)) {
+                        merged[key] = reelDoc.toSavedPost()
+                    }
                 }
+                merged.values.sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+            }
         )
     }
 
@@ -901,23 +1098,55 @@ class SocialRepository(
         val uid = requireUserId()
         val docId = "${uid}_${postId}"
         val ref = db.collection("saved_posts").document(docId)
+        val userSavedReelRef = db.collection("users")
+            .document(uid)
+            .collection("saved_reels")
+            .document(postId)
         try {
             val snap = ref.get().await()
-            if (snap.exists()) {
-                ref.delete().await()
+            val userReelSnap = if (targetType == "REEL") {
+                runCatching { userSavedReelRef.get().await() }.getOrNull()
+            } else null
+            val alreadySaved = snap.exists() || (userReelSnap?.exists() == true)
+            if (alreadySaved) {
+                if (snap.exists()) {
+                    ref.delete().await()
+                }
+                if (targetType == "REEL") {
+                    runCatching { userSavedReelRef.delete().await() }
+                }
                 false
             } else {
-                ref.set(
-                    mapOf(
-                        "userId" to uid,
-                        "postId" to postId,
-                        "targetType" to targetType,
-                        "authorUsername" to authorUsername,
-                        "captionPreview" to captionPreview.take(250),
-                        "mediaUrl" to mediaUrl,
-                        "createdAt" to FieldValue.serverTimestamp()
-                    )
-                ).await()
+                val payload = mutableMapOf<String, Any>(
+                    "userId" to uid,
+                    "postId" to postId,
+                    "targetType" to targetType,
+                    "authorUsername" to authorUsername.ifBlank { "mitr_creator" }.take(40),
+                    "captionPreview" to captionPreview.take(250),
+                    "mediaUrl" to mediaUrl.take(1000),
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+                if (targetType == "REEL") {
+                    payload["reelId"] = postId
+                }
+                ref.set(payload).await()
+                if (targetType == "REEL") {
+                    runCatching {
+                        userSavedReelRef.set(
+                            mapOf(
+                                "userId" to uid,
+                                "reelId" to postId,
+                                "postId" to postId,
+                                "targetType" to "REEL",
+                                "authorUsername" to authorUsername.ifBlank { "mitr_creator" }.take(40),
+                                "captionPreview" to captionPreview.take(250),
+                                "mediaUrl" to mediaUrl.take(1000),
+                                "videoUrl" to mediaUrl.take(1000),
+                                "createdAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    }
+                }
                 true
             }
         } catch (e: CancellationException) {
@@ -927,6 +1156,15 @@ class SocialRepository(
             throw e
         }
     }
+
+    suspend fun toggleSaveReel(reel: Reel): Result<Boolean> =
+        toggleSavePost(
+            postId = reel.id,
+            targetType = "REEL",
+            authorUsername = reel.authorUsername,
+            captionPreview = reel.caption,
+            mediaUrl = reel.videoUrl
+        )
 
     fun observeSavedMusic(): Flow<List<SavedMusic>> = flow {
         val uid = requireUserId()
@@ -981,7 +1219,7 @@ class SocialRepository(
         }
     }
 
-    // --- 5. Stories (24-Hour Expiration + Close Friends + Music) ---
+    // --- 5. Stories (24-Hour Expiration + Close Friends + Music + Personal Story Archive) ---
 
     fun observeActiveStories(): Flow<List<Story>> = flow {
         val uid = requireUserId()
@@ -1002,6 +1240,34 @@ class SocialRepository(
                                 (it.expiresAtMillis > nowMillis || it.isHighlighted)
                         }
                         .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                }
+                .catch { error ->
+                    if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
+                    emit(emptyList())
+                }
+        )
+    }
+
+    /**
+     * Observes ALL stories authored by the signed-in user (both active 24h stories and expired
+     * past stories >24h) for the organized Profile Story Archive section.
+     */
+    fun observeUserStoryArchive(): Flow<List<Story>> = flow {
+        val uid = requireUserId()
+        val path = "stories"
+        emitAll(
+            db.collection("stories")
+                .whereEqualTo("authorId", uid)
+                .snapshots()
+                .map { snap ->
+                    snap.documents.mapNotNull { doc ->
+                        runCatching {
+                            doc.toObject(Story::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                                ?.copy(id = doc.id)
+                        }.getOrNull()
+                    }
+                        .filter { it.authorId == uid }
+                        .sortedByDescending { it.storyCreatedMillis() }
                 }
                 .catch { error ->
                     if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
@@ -1095,6 +1361,7 @@ class SocialRepository(
             "viewerIds" to listOf(uid),
             "taggedUsernames" to finalTagged,
             "collaboratorUsernames" to finalCollabs,
+            "reactionEntries" to emptyList<String>(),
             "createdAt" to FieldValue.serverTimestamp(),
             "expiresAtMillis" to expiresAtMillis
         )
@@ -1142,6 +1409,136 @@ class SocialRepository(
         }
     }
 
+    /**
+     * Observes all emoji reactions linked to a specific Story ID from `/story_reactions`.
+     */
+    fun observeStoryReactions(storyId: String): Flow<List<StoryReaction>> = flow {
+        requireUserId()
+        val cleanStoryId = storyId.trim()
+        if (cleanStoryId.isBlank()) {
+            emit(emptyList())
+            return@flow
+        }
+        val path = "story_reactions"
+        emitAll(
+            db.collection("story_reactions")
+                .whereEqualTo("storyId", cleanStoryId)
+                .snapshots()
+                .map { snap ->
+                    snap.documents.mapNotNull { doc ->
+                        runCatching {
+                            doc.toObject(StoryReaction::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                                ?.copy(id = doc.id)
+                        }.getOrNull()
+                    }.sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                }
+                .catch { error ->
+                    if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
+                    emit(emptyList())
+                }
+        )
+    }
+
+    /**
+     * Records an expressive emoji feeling reaction (and optional reply note) on a Story in Firestore,
+     * storing the reaction document in `/story_reactions/{storyId}_{uid}` linked to `story.id` as well as
+     * updating `/stories/{storyId}`, and dispatches a real-time STORY_REACTION notification to the story author.
+     */
+    suspend fun reactToStoryWithEmoji(
+        story: Story,
+        actorProfile: UserProfile,
+        emoji: String,
+        replyText: String = ""
+    ): Result<Unit> = runCatching {
+        val uid = requireUserId()
+        val cleanEmoji = emoji.trim().ifBlank { "❤️" }.take(16)
+        val feelingLabel = storyFeelingLabelForEmoji(cleanEmoji)
+        val cleanUsername = actorProfile.username.trim().removePrefix("@").ifBlank { "mitr_user" }.take(32)
+        val reactionToken = "$uid:$cleanUsername:$cleanEmoji"
+        val storyRef = db.collection("stories").document(story.id)
+        val reactionDocId = "${story.id}_$uid".replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(120)
+        val reactionRef = db.collection("story_reactions").document(reactionDocId)
+        try {
+            // 1. Store reaction document in Firestore linked to the specific story ID
+            val reactionPayload = mapOf(
+                "storyId" to story.id,
+                "storyAuthorId" to story.authorId,
+                "userId" to uid,
+                "username" to cleanUsername,
+                "displayName" to actorProfile.displayName.ifBlank { cleanUsername }.take(75),
+                "emoji" to cleanEmoji,
+                "feelingLabel" to feelingLabel,
+                "replyText" to replyText.trim().take(250),
+                "createdAt" to FieldValue.serverTimestamp()
+            )
+            runCatching {
+                reactionRef.set(reactionPayload).await()
+            }
+
+            // 2. Also update reactionEntries on /stories/{storyId} so inline story cards & archive reflect it immediately
+            val snap = storyRef.get().await()
+            val existingReactions = if (snap.exists()) {
+                (snap.get("reactionEntries") as? List<*>)?.mapNotNull { it as? String }.orEmpty()
+            } else {
+                story.reactionEntries
+            }
+            val existingViewers = if (snap.exists()) {
+                (snap.get("viewerIds") as? List<*>)?.mapNotNull { it as? String }.orEmpty()
+            } else {
+                story.viewerIds
+            }
+            val filteredWithoutPriorFromUser = existingReactions.filterNot { it.startsWith("$uid:") }
+            val updatedReactions = (filteredWithoutPriorFromUser + reactionToken).distinct().takeLast(500)
+            val updatedViewers = (existingViewers + uid).distinct().take(500)
+            if (snap.exists()) {
+                storyRef.update(
+                    mapOf(
+                        "reactionEntries" to updatedReactions,
+                        "viewerIds" to updatedViewers
+                    )
+                ).await()
+            }
+
+            if (story.authorId.isNotBlank() && story.authorId != uid) {
+                val trimmedNote = replyText.trim().take(140)
+                val notifMessage = if (trimmedNote.isNotBlank()) {
+                    "reacted $cleanEmoji ($feelingLabel) & replied to your story"
+                } else {
+                    "reacted $cleanEmoji ($feelingLabel) to your story"
+                }
+                val notifDetail = when {
+                    trimmedNote.isNotBlank() -> "$cleanEmoji \"$trimmedNote\""
+                    story.caption.isNotBlank() -> "$cleanEmoji on \"${story.caption.take(70)}\""
+                    story.overlayText.isNotBlank() -> "$cleanEmoji on \"${story.overlayText.take(70)}\""
+                    else -> "Sent $cleanEmoji ($feelingLabel) reaction to your story"
+                }
+                createFirestoreNotification(
+                    recipientId = story.authorId,
+                    actorId = uid,
+                    actorUsername = cleanUsername,
+                    actorDisplayName = actorProfile.displayName.ifBlank { cleanUsername },
+                    actorAvatarUrl = actorProfile.avatarUrl,
+                    type = "STORY_REACTION",
+                    message = notifMessage,
+                    detailText = notifDetail,
+                    targetId = story.id,
+                    targetType = "STORY",
+                    targetMediaUrl = story.mediaUrl
+                )
+            }
+            logActivity(
+                activityType = "STORY_REPLY",
+                targetId = story.id,
+                summary = "Reacted $cleanEmoji ($feelingLabel) to @${story.authorUsername}'s story"
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, storyRef.path)
+            throw e
+        }
+    }
+
     suspend fun deleteStory(storyId: String): Result<Unit> = runCatching {
         requireUserId()
         val storyRef = db.collection("stories").document(storyId)
@@ -1170,14 +1567,68 @@ class SocialRepository(
                                 ?.copy(id = doc.id)
                         }.getOrNull()
                     }
-                        .filter { it.visibility.isBlank() || it.visibility == "PUBLIC" || it.authorId == uid }
+                        .filter { it.visibility.isBlank() || it.visibility.equals("PUBLIC", ignoreCase = true) || it.authorId == uid }
                         .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                        .distinctBy { it.id }
+                        .distinctBy { reel ->
+                            val timeBucket = (reel.createdAt?.seconds ?: 0L) / 30L
+                            if (reel.videoUrl.isBlank() && reel.caption.isBlank()) {
+                                reel.id
+                            } else {
+                                "${reel.authorId}|${reel.videoUrl.trim()}|${reel.caption.trim()}|$timeBucket"
+                            }
+                        }
                 }
                 .catch { error ->
+                    Log.e("FirestoreReelsSync", "Error syncing reels snapshot (uid=$uid, path=$path): ${error.message}", error)
                     if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
                     emit(emptyList())
                 }
         )
+    }
+
+    fun observeUserReels(authorId: String, authorUsername: String = ""): Flow<List<Reel>> = flow {
+        val uid = requireUserId()
+        val cleanUsername = authorUsername.trim().removePrefix("@")
+        val path = "reels"
+        emitAll(
+            db.collection("reels")
+                .snapshots()
+                .map { snap ->
+                    val allDocs = snap.documents.mapNotNull { doc ->
+                        runCatching {
+                            doc.toObject(Reel::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                                ?.copy(id = doc.id)
+                        }.getOrNull()
+                    }
+                    filterUserReelsForProfile(
+                        reels = allDocs,
+                        userId = authorId,
+                        profileDocId = authorId,
+                        username = cleanUsername,
+                        isOwner = authorId == uid,
+                        currentUserId = uid
+                    )
+                }
+                .catch { error ->
+                    Log.e("FirestoreReelsSync", "Error syncing user reels (authorId=$authorId, path=$path): ${error.message}", error)
+                    if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
+                    emit(emptyList())
+                }
+        )
+    }
+
+    suspend fun deleteReel(reelId: String): Result<Unit> = runCatching {
+        requireUserId()
+        val reelRef = db.collection("reels").document(reelId)
+        try {
+            reelRef.delete().await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, reelRef.path)
+            throw e
+        }
     }
 
     suspend fun createReel(
@@ -1189,9 +1640,33 @@ class SocialRepository(
         visibility: String = "PUBLIC",
         musicTrack: MusicTrack? = null,
         taggedUsernames: List<String> = emptyList(),
-        collaboratorUsernames: List<String> = emptyList()
+        collaboratorUsernames: List<String> = emptyList(),
+        videoTrimStartMs: Long = 0L,
+        videoTrimEndMs: Long = durationSeconds.coerceIn(15L, 60L) * 1000L
     ): Result<String> = runCatching {
         val uid = requireUserId()
+        val cleanVideoUrl = videoUrl.trim()
+        val cleanCaption = caption.trim()
+
+        // Guard against accidental rapid double-tap duplicate Reel creation
+        val existingRecentDuplicate = runCatching {
+            db.collection("reels")
+                .whereEqualTo("authorId", uid)
+                .get()
+                .await()
+                .documents
+                .firstOrNull { doc ->
+                    val docUrl = doc.getString("videoUrl")?.trim().orEmpty()
+                    val docCaption = doc.getString("caption")?.trim().orEmpty()
+                    val createdSec = doc.getTimestamp("createdAt")?.seconds ?: 0L
+                    val nowSec = Timestamp.now().seconds
+                    docUrl == cleanVideoUrl && docCaption == cleanCaption && kotlin.math.abs(nowSec - createdSec) <= 30L
+                }
+        }.getOrNull()
+        if (existingRecentDuplicate != null) {
+            return@runCatching existingRecentDuplicate.id
+        }
+
         val reelRef = db.collection("reels").document()
         val displayAudio = if (musicTrack != null && musicTrack.title.isNotBlank()) {
             "${musicTrack.title} • ${musicTrack.artist}"
@@ -1211,6 +1686,9 @@ class SocialRepository(
             .filter { it.isNotBlank() && it != authorProfile.username.lowercase(Locale.ROOT) }
             .distinct()
             .take(10)
+        val clampedDurationSec = durationSeconds.coerceIn(15L, 60L)
+        val safeTrimStart = videoTrimStartMs.coerceIn(0L, 600_000L)
+        val safeTrimEnd = videoTrimEndMs.coerceIn(safeTrimStart + 1_000L, 600_000L)
         val payload = mutableMapOf<String, Any>(
             "authorId" to uid,
             "authorUsername" to authorProfile.username,
@@ -1218,7 +1696,9 @@ class SocialRepository(
             "videoUrl" to videoUrl.trim(),
             "caption" to caption.trim(),
             "audioTrackName" to displayAudio.take(120),
-            "durationSeconds" to durationSeconds.coerceIn(1L, 180L),
+            "durationSeconds" to clampedDurationSec,
+            "videoTrimStartMs" to safeTrimStart,
+            "videoTrimEndMs" to safeTrimEnd,
             "visibility" to visibility,
             "likeCount" to 0L,
             "commentCount" to 0L,
@@ -1490,43 +1970,91 @@ class SocialRepository(
         }
     }
 
-    // --- 8. Direct Messaging & Message Requests ---
+    // --- 8. Direct Messaging & Message Requests (with On-Device Room Mobile Storage) ---
 
     fun observeConversations(): Flow<List<Conversation>> = flow {
         val uid = requireUserId()
         val path = "conversations"
-        emitAll(
-            db.collection("conversations")
-                .whereArrayContains("participantIds", uid)
-                .snapshots()
-                .map { snap ->
-                    snap.toObjects(Conversation::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                        .sortedByDescending { it.updatedAt ?: it.createdAt ?: Timestamp(0, 0) }
+        val cloudFlow = db.collection("conversations")
+            .whereArrayContains("participantIds", uid)
+            .snapshots()
+            .map { snap ->
+                val convs = snap.toObjects(Conversation::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    .sortedByDescending { it.updatedAt ?: it.createdAt ?: Timestamp(0, 0) }
+                if (localDao != null && convs.isNotEmpty()) {
+                    runCatching {
+                        localDao.upsertLocalConversations(convs.map { it.toLocalEntity(uid) })
+                    }
                 }
-                .catch { error ->
-                    if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                    throw error
+                convs
+            }
+            .catch { error ->
+                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
+                emit(emptyList())
+            }
+
+        if (localDao == null) {
+            emitAll(cloudFlow)
+        } else {
+            val localFlow = localDao.observeLocalConversations(uid)
+                .map { entities -> entities.map { it.toConversation() } }
+                .catch { emit(emptyList()) }
+            emitAll(
+                combine(cloudFlow, localFlow) { cloudList, localList ->
+                    val merged = LinkedHashMap<String, Conversation>()
+                    cloudList.forEach { if (it.id.isNotBlank()) merged[it.id] = it }
+                    localList.forEach { loc ->
+                        if (loc.id.isNotBlank() && !merged.containsKey(loc.id)) {
+                            merged[loc.id] = loc
+                        }
+                    }
+                    merged.values.sortedByDescending { it.updatedAt ?: it.createdAt ?: Timestamp(0, 0) }
                 }
-        )
+            )
+        }
     }
 
     fun observeMessages(conversationId: String): Flow<List<DirectMessage>> = flow {
         val uid = requireUserId()
         val path = "conversations/$conversationId/messages"
-        emitAll(
-            db.collection("conversations").document(conversationId)
-                .collection("messages")
-                .whereArrayContains("participantIds", uid)
-                .snapshots()
-                .map { snap ->
-                    snap.toObjects(DirectMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                        .sortedBy { it.createdAt ?: Timestamp(0, 0) }
+        val cloudFlow = db.collection("conversations").document(conversationId)
+            .collection("messages")
+            .whereArrayContains("participantIds", uid)
+            .snapshots()
+            .map { snap ->
+                val cloudMessages = snap.toObjects(DirectMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    .sortedBy { it.createdAt ?: Timestamp(0, 0) }
+                if (localDao != null && cloudMessages.isNotEmpty()) {
+                    runCatching {
+                        localDao.upsertLocalMessages(cloudMessages.map { it.toLocalEntity(isOffloadedFromCloud = false) })
+                    }
                 }
-                .catch { error ->
-                    if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                    throw error
+                cloudMessages
+            }
+            .catch { error ->
+                if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
+                emit(emptyList())
+            }
+
+        if (localDao == null) {
+            emitAll(cloudFlow)
+        } else {
+            val localFlow = localDao.observeLocalMessages(conversationId)
+                .map { entities -> entities.map { it.toDirectMessage() } }
+                .catch { emit(emptyList()) }
+            emitAll(
+                combine(cloudFlow, localFlow) { cloudMessages, localMessages ->
+                    val byId = LinkedHashMap<String, DirectMessage>()
+                    localMessages.forEach { msg ->
+                        if (msg.id.isNotBlank()) byId[msg.id] = msg
+                    }
+                    cloudMessages.forEach { msg ->
+                        if (msg.id.isNotBlank()) byId[msg.id] = msg
+                    }
+                    byId.values.sortedBy { it.createdAt?.toDate()?.time ?: 0L }
                 }
-        )
+            )
+        }
     }
 
     suspend fun startOrGetConversation(
@@ -1602,6 +2130,8 @@ class SocialRepository(
             "mediaType" to if (firstMedia.isNotBlank()) "IMAGE" else "NONE",
             "replyToMessageId" to "",
             "deliveryStatus" to "SENT",
+            "readByUids" to listOf(uid),
+            "readAtMillis" to 0L,
             "createdAt" to FieldValue.serverTimestamp()
         )
         try {
@@ -1646,9 +2176,32 @@ class SocialRepository(
             "mediaType" to mediaType,
             "replyToMessageId" to replyToMessageId,
             "deliveryStatus" to "SENT",
+            "readByUids" to listOf(uid),
+            "readAtMillis" to 0L,
             "createdAt" to FieldValue.serverTimestamp()
         )
         try {
+            // Immediately persist to user's phone storage (Room) as well as Firestore
+            if (localDao != null) {
+                runCatching {
+                    val localMsg = DirectMessage(
+                        id = msgRef.id,
+                        conversationId = conversation.id,
+                        participantIds = conversation.participantIds,
+                        senderId = uid,
+                        senderUsername = senderUsername,
+                        text = displaySummary,
+                        mediaUrl = mediaUrl.trim(),
+                        mediaType = mediaType,
+                        replyToMessageId = replyToMessageId,
+                        deliveryStatus = "SENT",
+                        readByUids = listOf(uid),
+                        readAtMillis = 0L,
+                        createdAt = Timestamp.now()
+                    )
+                    localDao?.upsertLocalMessage(localMsg.toLocalEntity(isOffloadedFromCloud = false))
+                }
+            }
             msgRef.set(payload).await()
             convRef.update(
                 mapOf(
@@ -1688,6 +2241,9 @@ class SocialRepository(
 
     suspend fun deleteDirectMessage(conversationId: String, messageId: String): Result<Unit> = runCatching {
         requireUserId()
+        if (localDao != null) {
+            runCatching { localDao?.deleteLocalMessage(messageId) }
+        }
         val msgRef = db.collection("conversations").document(conversationId)
             .collection("messages").document(messageId)
         try {
@@ -1700,16 +2256,61 @@ class SocialRepository(
         }
     }
 
-    suspend fun markConversationRead(conversationId: String): Result<Unit> = runCatching {
-        requireUserId()
+    /**
+     * Marks a conversation as read in Firestore and updates incoming messages'
+     * deliveryStatus to "READ" + appends the reader's UID to readByUids in real time
+     * when readReceiptsEnabled is true.
+     */
+    suspend fun markConversationRead(
+        conversationId: String,
+        readReceiptsEnabled: Boolean = true
+    ): Result<Unit> = runCatching {
+        val uid = requireUserId()
         val convRef = db.collection("conversations").document(conversationId)
         try {
-            convRef.update(
-                mapOf(
-                    "unreadCount" to 0L,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
+            val convSnap = convRef.get().await()
+            if (convSnap.exists()) {
+                val lastSender = convSnap.getString("lastSenderId").orEmpty()
+                val unreadCount = convSnap.getLong("unreadCount") ?: 0L
+                if (unreadCount > 0L && lastSender != uid) {
+                    convRef.update(
+                        mapOf(
+                            "unreadCount" to 0L,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+
+            if (readReceiptsEnabled) {
+                val nowMillis = System.currentTimeMillis()
+                val messagesSnap = convRef.collection("messages")
+                    .whereArrayContains("participantIds", uid)
+                    .get()
+                    .await()
+                for (doc in messagesSnap.documents) {
+                    val senderId = doc.getString("senderId").orEmpty()
+                    val currentStatus = doc.getString("deliveryStatus").orEmpty()
+                    val existingReadBy = (doc.get("readByUids") as? List<*>)
+                        ?.mapNotNull { it as? String }
+                        .orEmpty()
+                    if (senderId.isNotBlank() && senderId != uid &&
+                        (currentStatus != "READ" || !existingReadBy.contains(uid))
+                    ) {
+                        val updatedReadBy = (existingReadBy + senderId + uid)
+                            .filter { it.isNotBlank() }
+                            .distinct()
+                            .take(10)
+                        doc.reference.update(
+                            mapOf(
+                                "deliveryStatus" to "READ",
+                                "readByUids" to updatedReadBy,
+                                "readAtMillis" to nowMillis
+                            )
+                        ).await()
+                    }
+                }
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -1740,12 +2341,59 @@ class SocialRepository(
 
     suspend fun searchUsersInFirestore(rawQuery: String): Result<List<UserProfile>> = runCatching {
         requireUserId()
-        val clean = rawQuery.trim().removePrefix("@").removePrefix("#").lowercase(Locale.ROOT)
+        val rawTrimmed = rawQuery.trim().removePrefix("@").removePrefix("#")
+        val clean = rawTrimmed.lowercase(Locale.ROOT)
         val path = "users"
         try {
             val usersById = linkedMapOf<String, UserProfile>()
 
-            // 1. Load all profiles from /users
+            // 1. Direct Firestore prefix queries on 'users' collection by username and displayName
+            if (clean.isNotBlank()) {
+                val usernameQuerySnap = runCatching {
+                    db.collection("users")
+                        .whereGreaterThanOrEqualTo("username", clean)
+                        .whereLessThanOrEqualTo("username", clean + "\uf8ff")
+                        .get()
+                        .await()
+                }.getOrNull()
+                usernameQuerySnap?.documents?.mapNotNull { it.toNormalizedUserProfile() }?.forEach { profile ->
+                    if (profile.userId.isNotBlank()) {
+                        usersById[profile.userId] = profile
+                    }
+                }
+
+                val displayNameQuerySnap = runCatching {
+                    db.collection("users")
+                        .whereGreaterThanOrEqualTo("displayName", rawTrimmed)
+                        .whereLessThanOrEqualTo("displayName", rawTrimmed + "\uf8ff")
+                        .get()
+                        .await()
+                }.getOrNull()
+                displayNameQuerySnap?.documents?.mapNotNull { it.toNormalizedUserProfile() }?.forEach { profile ->
+                    if (profile.userId.isNotBlank()) {
+                        usersById[profile.userId] = profile
+                    }
+                }
+                val titleCased = rawTrimmed.replaceFirstChar {
+                    if (it.isLowerCase()) it.titlecase(Locale.ROOT) else it.toString()
+                }
+                if (titleCased != rawTrimmed) {
+                    val titleCaseDisplayNameSnap = runCatching {
+                        db.collection("users")
+                            .whereGreaterThanOrEqualTo("displayName", titleCased)
+                            .whereLessThanOrEqualTo("displayName", titleCased + "\uf8ff")
+                            .get()
+                            .await()
+                    }.getOrNull()
+                    titleCaseDisplayNameSnap?.documents?.mapNotNull { it.toNormalizedUserProfile() }?.forEach { profile ->
+                        if (profile.userId.isNotBlank()) {
+                            usersById[profile.userId] = profile
+                        }
+                    }
+                }
+            }
+
+            // 2. Full scan of /users collection for case-insensitive partial matching on username & displayName
             val snap = runCatching { db.collection("users").get().await() }.getOrNull()
             snap?.documents?.mapNotNull { it.toNormalizedUserProfile() }?.forEach { profile ->
                 if (profile.userId.isNotBlank()) {
@@ -1753,7 +2401,7 @@ class SocialRepository(
                 }
             }
 
-            // 2. Also merge any username claims from /usernames so every registered handle is searchable
+            // 3. Also merge any username claims from /usernames so every registered handle is searchable
             val usernamesSnap = runCatching { db.collection("usernames").get().await() }.getOrNull()
             usernamesSnap?.documents?.forEach { doc ->
                 val claimUid = doc.getString("userId")?.trim().orEmpty()
@@ -1769,7 +2417,7 @@ class SocialRepository(
                 }
             }
 
-            // 3. Also merge any post/reel authors so creators are always discoverable
+            // 4. Also merge any post/reel authors so creators are always discoverable with real names
             val postsSnap = runCatching { db.collection("posts").get().await() }.getOrNull()
             postsSnap?.documents?.forEach { doc ->
                 val authorId = doc.getString("authorId")?.trim().orEmpty()
@@ -1789,16 +2437,7 @@ class SocialRepository(
             }
 
             val allUsers = usersById.values.toList()
-            if (clean.isBlank()) {
-                allUsers
-            } else {
-                allUsers.filter { user ->
-                    user.username.lowercase(Locale.ROOT).contains(clean) ||
-                        user.displayName.lowercase(Locale.ROOT).contains(clean) ||
-                        user.bio.lowercase(Locale.ROOT).contains(clean) ||
-                        user.userId.lowercase(Locale.ROOT).contains(clean)
-                }
-            }
+            filterAndRankUsersByQuery(allUsers, rawQuery)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -1960,30 +2599,55 @@ class SocialRepository(
         }
     }
 
-    // --- 11. Activity Log & Search History ---
+    // --- 11. Activity Log & Search History + Mobile Storage Offloading ---
 
     fun observeUserActivity(): Flow<List<UserActivityLog>> = flow {
         val uid = requireUserId()
-        val path = "user_activity"
-        emitAll(
-            db.collection("user_activity")
-                .whereEqualTo("userId", uid)
-                .snapshots()
-                .map { snap ->
-                    snap.toObjects(UserActivityLog::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                        .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
-                }
-                .catch { error ->
-                    if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
-                    throw error
-                }
-        )
+        if (localDao != null) {
+            emitAll(
+                localDao.observeLocalActivityLogs(uid)
+                    .map { list -> list.map { it.toUserActivityLog() } }
+                    .catch { emit(emptyList()) }
+            )
+        } else {
+            val path = "user_activity"
+            emitAll(
+                db.collection("user_activity")
+                    .whereEqualTo("userId", uid)
+                    .snapshots()
+                    .map { snap ->
+                        snap.toObjects(UserActivityLog::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                            .sortedByDescending { it.createdAt ?: Timestamp(0, 0) }
+                    }
+                    .catch { error ->
+                        if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
+                        emit(emptyList())
+                    }
+            )
+        }
     }
 
+    /**
+     * Stores user activity logs (likes, comments, searches, story reactions) on the user's
+     * mobile storage (Room SQLite) instead of cloud Firestore so non-essential logs never
+     * fill up the cloud database.
+     */
     suspend fun logActivity(activityType: String, targetId: String, summary: String): Result<Unit> = runCatching {
         val uid = requireUserId()
-        val ref = db.collection("user_activity").document()
-        try {
+        val nowMs = System.currentTimeMillis()
+        if (localDao != null) {
+            localDao.insertLocalActivityLog(
+                LocalActivityLogEntity(
+                    id = "act_${uid}_${nowMs}_${targetId.take(16)}",
+                    userId = uid,
+                    activityType = activityType,
+                    targetId = targetId.ifBlank { "none" },
+                    summary = summary.take(280),
+                    createdAtMillis = nowMs
+                )
+            )
+        } else {
+            val ref = db.collection("user_activity").document()
             ref.set(
                 mapOf(
                     "userId" to uid,
@@ -1993,25 +2657,130 @@ class SocialRepository(
                     "createdAt" to FieldValue.serverTimestamp()
                 )
             ).await()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.CREATE, ref.path)
-            throw e
         }
     }
 
     suspend fun deleteActivityItem(activityId: String): Result<Unit> = runCatching {
         requireUserId()
-        val ref = db.collection("user_activity").document(activityId)
-        try {
-            ref.delete().await()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.DELETE, ref.path)
-            throw e
+        if (localDao != null) {
+            localDao.deleteLocalActivityLog(activityId)
         }
+        runCatching {
+            db.collection("user_activity").document(activityId).delete().await()
+        }
+    }
+
+    /**
+     * Offloads chat messages and activity logs from Cloud Firestore onto the user's mobile storage
+     * (Room SQLite) and prunes older read messages & cloud activity logs from Firestore to prevent
+     * the cloud database from filling up while keeping 100% of chat history on the user's phone.
+     */
+    suspend fun offloadChatHistoryToMobileStorage(
+        conversationId: String? = null,
+        keepNewestInCloud: Int = 3
+    ): Result<MobileStorageStats> = runCatching {
+        val uid = requireUserId()
+        val dao = localDao ?: return@runCatching MobileStorageStats()
+        var newlyOffloadedCount = 0
+
+        // 1. Migrate any legacy cloud user_activity documents to local phone storage and delete from cloud
+        runCatching {
+            val cloudActivities = db.collection("user_activity")
+                .whereEqualTo("userId", uid)
+                .get()
+                .await()
+            val entities = cloudActivities.documents.mapNotNull { doc ->
+                runCatching {
+                    doc.toObject(UserActivityLog::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        ?.copy(id = doc.id)
+                        ?.toLocalEntity()
+                }.getOrNull()
+            }
+            if (entities.isNotEmpty()) {
+                dao.insertLocalActivityLogs(entities)
+            }
+            for (doc in cloudActivities.documents) {
+                runCatching { doc.reference.delete().await() }
+            }
+        }
+
+        // 2. Archive chat messages to local mobile storage and prune older read messages authored by current user from Firestore
+        val targetConvIds = if (!conversationId.isNullOrBlank()) {
+            listOf(conversationId)
+        } else {
+            val convSnap = runCatching {
+                db.collection("conversations")
+                    .whereArrayContains("participantIds", uid)
+                    .get()
+                    .await()
+            }.getOrNull()
+            val cloudConvs = convSnap?.toObjects(Conversation::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE).orEmpty()
+            if (cloudConvs.isNotEmpty()) {
+                dao.upsertLocalConversations(cloudConvs.map { it.toLocalEntity(uid) })
+            }
+            cloudConvs.map { it.id }.filter { it.isNotBlank() }
+        }
+
+        for (cid in targetConvIds) {
+            val msgSnap = runCatching {
+                db.collection("conversations").document(cid)
+                    .collection("messages")
+                    .whereArrayContains("participantIds", uid)
+                    .get()
+                    .await()
+            }.getOrNull() ?: continue
+
+            val allMsgs = msgSnap.documents.mapNotNull { doc ->
+                runCatching {
+                    doc.toObject(DirectMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        ?.copy(id = doc.id)
+                }.getOrNull()
+            }.sortedBy { it.createdAt?.toDate()?.time ?: 0L }
+
+            if (allMsgs.isNotEmpty()) {
+                dao.upsertLocalMessages(allMsgs.map { it.toLocalEntity(isOffloadedFromCloud = true) })
+            }
+
+            // Prune older cloud messages sent by this user (Firestore rules permit sender to delete their own message docs)
+            val pruneCandidates = if (allMsgs.size > keepNewestInCloud) {
+                allMsgs.dropLast(keepNewestInCloud)
+            } else {
+                allMsgs.filter { it.deliveryStatus == "READ" }
+            }
+            for (oldMsg in pruneCandidates) {
+                if (oldMsg.senderId == uid && oldMsg.id.isNotBlank()) {
+                    val deleted = runCatching {
+                        db.collection("conversations").document(cid)
+                            .collection("messages").document(oldMsg.id)
+                            .delete()
+                            .await()
+                        true
+                    }.getOrDefault(false)
+                    if (deleted) {
+                        newlyOffloadedCount++
+                    }
+                }
+            }
+        }
+
+        getMobileStorageStats()
+    }
+
+    suspend fun getMobileStorageStats(): MobileStorageStats {
+        val uid = auth.currentUser?.uid.orEmpty()
+        val dao = localDao ?: return MobileStorageStats()
+        val msgCount = runCatching { dao.countAllLocalMessages() }.getOrDefault(0)
+        val offloadedCount = runCatching { dao.countOffloadedMessages() }.getOrDefault(0)
+        val convCount = if (uid.isNotBlank()) runCatching { dao.countLocalConversations(uid) }.getOrDefault(0) else 0
+        val actCount = if (uid.isNotBlank()) runCatching { dao.countLocalActivityLogs(uid) }.getOrDefault(0) else 0
+        val estimatedBytes = (msgCount * 640L) + (convCount * 420L) + (actCount * 320L)
+        return MobileStorageStats(
+            localMessagesCount = msgCount,
+            offloadedCloudMessagesCount = offloadedCount,
+            localConversationsCount = convCount,
+            localActivityLogsCount = actCount,
+            estimatedSavedCloudBytes = estimatedBytes
+        )
     }
 
     // --- 12. Content Moderation Reports & Account Deletion ---

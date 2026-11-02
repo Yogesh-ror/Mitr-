@@ -24,10 +24,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,30 +32,23 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import com.example.ui.theme.LuminaAmber
 import com.example.ui.theme.LuminaCoral
 import com.example.ui.theme.LuminaPrismGradient
-import com.google.android.gms.ads.AdListener
-import com.google.android.gms.ads.AdRequest
-import com.google.android.gms.ads.AdSize
-import com.google.android.gms.ads.AdView
-import com.google.android.gms.ads.LoadAdError
 
 const val MITR_ADMOB_APP_ID = "ca-app-pub-8779810103268412~8496898038"
 const val MITR_ADMOB_AD_UNIT_ID = "ca-app-pub-8779810103268412/8610954816"
 
 /**
- * AdMob Feed Card displayed in the Home Post Feed LazyColumn using the user's configured AdMob ID.
+ * Self-contained Mitr Creator Spotlight / Sponsored Feed Card rendered purely in Jetpack Compose
+ * so it never binds to `android.adservices.MEASUREMENT_SERVICE` on devices or emulators without
+ * Privacy Sandbox AdServices.
  */
 @Composable
 fun MitrFeedAdMobCard(
     modifier: Modifier = Modifier,
     slotIndex: Int = 0
 ) {
-    var adLoaded by remember { mutableStateOf(false) }
-    var adStatusMessage by remember { mutableStateOf("Loading AdMob unit...") }
-
     LuminaGlassCard(
         modifier = modifier
             .fillMaxWidth()
@@ -73,7 +62,6 @@ fun MitrFeedAdMobCard(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Sponsored Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -92,7 +80,7 @@ fun MitrFeedAdMobCard(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Campaign,
-                            contentDescription = "Sponsored Ad",
+                            contentDescription = "Mitr Spotlight",
                             tint = Color.White,
                             modifier = Modifier.size(20.dp)
                         )
@@ -103,7 +91,7 @@ fun MitrFeedAdMobCard(
                             horizontalArrangement = Arrangement.spacedBy(5.dp)
                         ) {
                             Text(
-                                text = "Sponsored • Google AdMob",
+                                text = "Mitr Creator Spotlight",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurface
@@ -116,7 +104,7 @@ fun MitrFeedAdMobCard(
                             )
                         }
                         Text(
-                            text = "Unit: $MITR_ADMOB_AD_UNIT_ID",
+                            text = "Featured Indian Creators & Blue Tick Priority Reach",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -133,7 +121,7 @@ fun MitrFeedAdMobCard(
                     )
                 ) {
                     Text(
-                        text = "Ad",
+                        text = "Spotlight",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary,
@@ -142,79 +130,51 @@ fun MitrFeedAdMobCard(
                 }
             }
 
-            // Live Google AdMob AdView Container
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(255.dp)
+                    .height(140.dp)
                     .clip(RoundedCornerShape(16.dp))
                     .background(MaterialTheme.colorScheme.surfaceVariant)
                     .border(
                         width = 1.dp,
                         color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
                         shape = RoundedCornerShape(16.dp)
-                    ),
+                    )
+                    .testTag("admob_feed_adview_$slotIndex"),
                 contentAlignment = Alignment.Center
             ) {
-                if (!adLoaded) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.padding(16.dp)
-                    ) {
-                        Text(
-                            text = "Mitr Sponsored Placement",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = adStatusMessage,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.padding(16.dp)
+                ) {
+                    Text(
+                        text = "Grow Faster with Mitr Blue Tick",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Verified creators receive priority reach across the Home Feed & Reels.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
-
-                AndroidView(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("admob_feed_adview_$slotIndex"),
-                    factory = { context ->
-                        AdView(context).apply {
-                            setAdSize(AdSize.MEDIUM_RECTANGLE)
-                            adUnitId = MITR_ADMOB_AD_UNIT_ID
-                            adListener = object : AdListener() {
-                                override fun onAdLoaded() {
-                                    adLoaded = true
-                                    adStatusMessage = "Ad Loaded"
-                                }
-
-                                override fun onAdFailedToLoad(error: LoadAdError) {
-                                    adLoaded = false
-                                    adStatusMessage = "AdMob Active ($MITR_ADMOB_AD_UNIT_ID)"
-                                }
-                            }
-                            loadAd(AdRequest.Builder().build())
-                        }
-                    }
-                )
             }
         }
     }
 }
 
 /**
- * Full-Screen Vertical Pager AdMob Slide displayed in the Reels section (1 ad every 10 reels).
+ * Full-Screen Vertical Pager Spotlight Slide displayed in the Reels section (1 every 10 reels)
+ * rendered purely in Compose without AdServices binder calls.
  */
 @Composable
 fun MitrReelAdMobPage(
     adPageIndex: Int,
     modifier: Modifier = Modifier
 ) {
-    var adLoaded by remember { mutableStateOf(false) }
-    var adStatusMessage by remember { mutableStateOf("Loading Sponsored Reel Ad...") }
-
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -229,7 +189,6 @@ fun MitrReelAdMobPage(
             )
             .testTag("admob_reel_page_$adPageIndex")
     ) {
-        // Top Sponsored Pill Badge
         Surface(
             shape = RoundedCornerShape(50),
             color = Color.Black.copy(alpha = 0.65f),
@@ -245,12 +204,12 @@ fun MitrReelAdMobPage(
             ) {
                 Icon(
                     imageVector = Icons.Default.Campaign,
-                    contentDescription = "Sponsored Reel",
+                    contentDescription = "Creator Spotlight",
                     tint = LuminaAmber,
                     modifier = Modifier.size(16.dp)
                 )
                 Text(
-                    text = "Sponsored Reel • 1 in 10 Reels Ad",
+                    text = "Mitr Creator Spotlight • 1 in 10 Reels",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
@@ -258,7 +217,6 @@ fun MitrReelAdMobPage(
             }
         }
 
-        // Center AdMob Medium Rectangle + Branded Showcase Frame
         LuminaGlassCard(
             modifier = Modifier
                 .align(Alignment.Center)
@@ -293,13 +251,13 @@ fun MitrReelAdMobPage(
                     }
                     Column {
                         Text(
-                            text = "Google AdMob Reels Placement",
+                            text = "Mitr Reels Creator Boost",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "Ad Unit: $MITR_ADMOB_AD_UNIT_ID",
+                            text = "Share 15–60s short-form videos with priority discovery",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -309,64 +267,38 @@ fun MitrReelAdMobPage(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(260.dp)
+                        .height(180.dp)
                         .clip(RoundedCornerShape(18.dp))
                         .background(MaterialTheme.colorScheme.surfaceVariant)
                         .border(
                             1.dp,
                             MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
                             RoundedCornerShape(18.dp)
-                        ),
+                        )
+                        .testTag("admob_reel_adview_$adPageIndex"),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (!adLoaded) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier.padding(16.dp)
-                        ) {
-                            Text(
-                                text = "Sponsored Reel Partner",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = adStatusMessage,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+                        Text(
+                            text = "Mitr Verified Creator Community",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "Create, trim, and publish 15–60s Reels with synced music",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-
-                    AndroidView(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("admob_reel_adview_$adPageIndex"),
-                        factory = { context ->
-                            AdView(context).apply {
-                                setAdSize(AdSize.MEDIUM_RECTANGLE)
-                                adUnitId = MITR_ADMOB_AD_UNIT_ID
-                                adListener = object : AdListener() {
-                                    override fun onAdLoaded() {
-                                        adLoaded = true
-                                        adStatusMessage = "Ad Loaded"
-                                    }
-
-                                    override fun onAdFailedToLoad(error: LoadAdError) {
-                                        adLoaded = false
-                                        adStatusMessage = "AdMob Ready ($MITR_ADMOB_AD_UNIT_ID)"
-                                    }
-                                }
-                                loadAd(AdRequest.Builder().build())
-                            }
-                        }
-                    )
                 }
             }
         }
 
-        // Bottom Swipe Hint
         Row(
             modifier = Modifier
                 .align(Alignment.BottomCenter)

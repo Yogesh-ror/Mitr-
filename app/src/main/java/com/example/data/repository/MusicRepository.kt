@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import com.example.BuildConfig
 import com.example.data.model.MusicTrack
+import com.example.data.model.isValidMusicApiKey
+import com.example.data.model.overlayMusicTrackOnReelVideo
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.InlineDataPart
@@ -30,15 +32,32 @@ class MusicRepository(
         .build()
 ) {
     val apiKey: String = BuildConfig.MUSIC_API_KEY
+    val isApiKeyConfigured: Boolean
+        get() = isValidMusicApiKey(apiKey)
 
     init {
-        if (apiKey.isEmpty() || apiKey == "YOUR_MUSIC_API_KEY") {
+        if (!isApiKeyConfigured) {
             Log.w("MusicRepository", "MUSIC_API_KEY is using placeholder; configure your key in AI Studio Secrets panel.")
         }
     }
 
     /**
-     * Featured Indian Songs prioritized first so users immediately see Indian hits at the top of the Music Studio.
+     * Builds HTTP headers authenticated with BuildConfig.MUSIC_API_KEY when configured.
+     */
+    fun buildAuthenticatedHeaders(): Map<String, String> {
+        val headers = LinkedHashMap<String, String>()
+        headers["Accept"] = "application/json"
+        if (isApiKeyConfigured) {
+            val cleanKey = apiKey.trim()
+            headers["X-Music-Api-Key"] = cleanKey
+            headers["X-API-Key"] = cleanKey
+            headers["Authorization"] = "Bearer $cleanKey"
+        }
+        return headers
+    }
+
+    /**
+     * Featured Indian & Reel Background Music Library tracks (supporting 15–60s Reel overlays).
      */
     val featuredIndianSongs: List<MusicTrack> = listOf(
         MusicTrack(
@@ -48,7 +67,7 @@ class MusicRepository(
             albumName = "Brahmastra (Original Motion Picture Soundtrack)",
             coverUrl = "https://is1-ssl.mzstatic.com/image/thumb/Music112/v4/4b/68/7b/4b687b1e-1d06-3b7d-8f9c-6e6a1d1f2e3a/cover.jpg/300x300bb.jpg",
             audioUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
-            durationMs = 30_000L,
+            durationMs = 60_000L,
             genre = "Bollywood • Indian",
             trimStartMs = 0L,
             trimEndMs = 15_000L
@@ -60,7 +79,7 @@ class MusicRepository(
             albumName = "Jawan",
             coverUrl = "",
             audioUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
-            durationMs = 30_000L,
+            durationMs = 60_000L,
             genre = "Bollywood • Indian",
             trimStartMs = 0L,
             trimEndMs = 15_000L
@@ -72,7 +91,7 @@ class MusicRepository(
             albumName = "Bhediya",
             coverUrl = "",
             audioUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3",
-            durationMs = 30_000L,
+            durationMs = 60_000L,
             genre = "Bollywood • Indian",
             trimStartMs = 0L,
             trimEndMs = 15_000L
@@ -84,7 +103,7 @@ class MusicRepository(
             albumName = "Bad Newz",
             coverUrl = "",
             audioUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3",
-            durationMs = 30_000L,
+            durationMs = 60_000L,
             genre = "Punjabi • Indian",
             trimStartMs = 0L,
             trimEndMs = 15_000L
@@ -96,7 +115,7 @@ class MusicRepository(
             albumName = "Jab We Met",
             coverUrl = "",
             audioUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-5.mp3",
-            durationMs = 30_000L,
+            durationMs = 60_000L,
             genre = "Bollywood Classic • Indian",
             trimStartMs = 0L,
             trimEndMs = 15_000L
@@ -108,7 +127,7 @@ class MusicRepository(
             albumName = "Rockstar",
             coverUrl = "",
             audioUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-6.mp3",
-            durationMs = 30_000L,
+            durationMs = 60_000L,
             genre = "Sufi • Indian",
             trimStartMs = 0L,
             trimEndMs = 15_000L
@@ -120,7 +139,7 @@ class MusicRepository(
             albumName = "Heeriye - Single",
             coverUrl = "",
             audioUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-7.mp3",
-            durationMs = 30_000L,
+            durationMs = 60_000L,
             genre = "Indian Pop",
             trimStartMs = 0L,
             trimEndMs = 15_000L
@@ -132,7 +151,7 @@ class MusicRepository(
             albumName = "MoonChild Era",
             coverUrl = "",
             audioUrl = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3",
-            durationMs = 30_000L,
+            durationMs = 60_000L,
             genre = "Punjabi Pop • Indian",
             trimStartMs = 0L,
             trimEndMs = 15_000L
@@ -140,7 +159,32 @@ class MusicRepository(
     )
 
     /**
-     * Fetches songs and streamable audio previews prioritizing Indian songs first.
+     * Prepares and filters background music tracks for overlaying onto a recorded Reel video.
+     */
+    fun getReelOverlayTracks(
+        query: String = "",
+        reelDurationSeconds: Long = 15L,
+        sourceTracks: List<MusicTrack> = featuredIndianSongs
+    ): List<MusicTrack> {
+        val cleanQuery = query.trim()
+        val filtered = if (cleanQuery.isBlank()) {
+            sourceTracks
+        } else {
+            sourceTracks.filter {
+                it.title.contains(cleanQuery, ignoreCase = true) ||
+                    it.artist.contains(cleanQuery, ignoreCase = true) ||
+                    it.genre.contains(cleanQuery, ignoreCase = true) ||
+                    it.albumName.contains(cleanQuery, ignoreCase = true)
+            }
+        }
+        return filtered.map { track ->
+            overlayMusicTrackOnReelVideo(track, reelDurationSeconds, track.trimStartMs)
+        }
+    }
+
+    /**
+     * Fetches songs and streamable audio previews prioritizing Indian songs first,
+     * using BuildConfig.MUSIC_API_KEY when configured.
      */
     suspend fun searchMusicTracks(
         query: String,
@@ -173,7 +217,13 @@ class MusicRepository(
 
             val combined = mutableListOf<MusicTrack>()
 
-            // Always place matching featured Indian songs at the very top when browsing Indian categories or matching search
+            // 1. If user configured a real BuildConfig.MUSIC_API_KEY, query the MUSIC_API_KEY endpoint first
+            if (isApiKeyConfigured) {
+                val jamendoTracks = fetchFromJamendoWithKey(effectiveQuery, apiKey.trim())
+                combined.addAll(jamendoTracks)
+            }
+
+            // 2. Always include matching featured Indian & Reel background songs
             if (isIndianCategory) {
                 combined.addAll(featuredIndianSongs)
             } else if (query.isNotBlank()) {
@@ -185,16 +235,10 @@ class MusicRepository(
                 combined.addAll(matchingFeatured)
             }
 
-            // 1. Live Music Search via Apple iTunes India Store (`country=IN`) so real Indian songs and 30s M4A previews appear first
+            // 3. Live Music Search via Apple iTunes India Store (`country=IN`) with MUSIC_API_KEY header when present
             val itunesIndiaTracks = runCatching { fetchFromItunesSearchApi(effectiveQuery, country = "IN") }
                 .getOrDefault(emptyList())
             combined.addAll(itunesIndiaTracks)
-
-            // 2. If user configured a custom Jamendo client_id in BuildConfig.MUSIC_API_KEY, query with it as well
-            if (apiKey.isNotBlank() && apiKey != "YOUR_MUSIC_API_KEY") {
-                val jamendoTracks = fetchFromJamendoWithKey(effectiveQuery, apiKey)
-                combined.addAll(jamendoTracks)
-            }
 
             if (combined.isEmpty()) {
                 featuredIndianSongs

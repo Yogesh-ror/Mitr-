@@ -121,11 +121,15 @@ import com.example.data.model.MusicTrack
 import com.example.data.model.Post
 import com.example.data.model.SavedMusic
 import com.example.data.model.SavedPost
+import com.example.data.model.STORY_FEELING_REACTIONS
 import com.example.data.model.Story
 import com.example.data.model.UiState
 import com.example.data.model.UserProfile
 import com.example.data.model.isCreatorHandleBlueTickVerified
 import com.example.data.model.isUserBlueTickVerified
+import com.example.data.model.parsedReactions
+import com.example.data.model.reactionCountsByEmoji
+import com.example.data.model.storyFeelingLabelForEmoji
 import com.example.ui.components.AttachedMusicPillBanner
 import com.example.ui.components.AuroraAmbientBackground
 import com.example.ui.components.LuminaGlassCard
@@ -190,6 +194,7 @@ fun HomeFeedScreen(
     observeComments: (String, String) -> Flow<List<Comment>>,
     onAddComment: (String, String, String, String) -> Unit,
     onRecordStoryView: (Story) -> Unit,
+    onReactToStory: (Story, String, String) -> Unit = { _, _, _ -> },
     onDeleteStory: (String) -> Unit
 ) {
     var selectedStoryIndex by remember { mutableStateOf<Int?>(null) }
@@ -849,6 +854,7 @@ fun HomeFeedScreen(
             onToggleHighlightStory = onToggleHighlightStory,
             onDismiss = { selectedStoryIndex = null },
             onRecordView = onRecordStoryView,
+            onReactToStory = onReactToStory,
             onDeleteStory = { storyId ->
                 onDeleteStory(storyId)
                 selectedStoryIndex = null
@@ -2149,6 +2155,7 @@ fun FullScreenStoryViewerDialog(
     onToggleHighlightStory: (Story, String) -> Unit = { _, _ -> },
     onDismiss: () -> Unit,
     onRecordView: (Story) -> Unit,
+    onReactToStory: (Story, String, String) -> Unit = { _, _, _ -> },
     onDeleteStory: (String) -> Unit,
     onMuteStoryAuthor: (Story) -> Unit,
     onReportStory: (Story) -> Unit
@@ -2158,6 +2165,9 @@ fun FullScreenStoryViewerDialog(
     var isVideoMuted by remember { mutableStateOf(false) }
     var progress by remember { mutableStateOf(0f) }
     var showViewersSheet by remember { mutableStateOf(false) }
+    var storyReplyNote by remember { mutableStateOf("") }
+    var lastSentEmojiFeedback by remember { mutableStateOf<String?>(null) }
+    val storyFeelingOptions = remember { STORY_FEELING_REACTIONS }
     val storyAudioPlayer = rememberAudioClipPlayer()
 
     DisposableEffect(Unit) {
@@ -2198,7 +2208,7 @@ fun FullScreenStoryViewerDialog(
         val step = if (isVideoStory) 0.005f else 0.01f
         while (progress < 1f) {
             delay(50L)
-            if (!isPaused && !showViewersSheet) {
+            if (!isPaused && !showViewersSheet && storyReplyNote.isBlank()) {
                 progress += step
             }
         }
@@ -2209,6 +2219,23 @@ fun FullScreenStoryViewerDialog(
             storyAudioPlayer.pause()
             onDismiss()
         }
+    }
+
+    LaunchedEffect(lastSentEmojiFeedback) {
+        if (lastSentEmojiFeedback != null) {
+            delay(2200L)
+            lastSentEmojiFeedback = null
+        }
+    }
+
+    val parsedStoryReactions = remember(currentStory.reactionEntries) {
+        currentStory.parsedReactions()
+    }
+    val emojiReactionCounts = remember(currentStory.reactionEntries) {
+        currentStory.reactionCountsByEmoji()
+    }
+    val mySelectedStoryEmoji = remember(parsedStoryReactions, currentUserId) {
+        parsedStoryReactions.lastOrNull { it.userId == currentUserId }?.emoji
     }
 
     val animatedProgress by animateFloatAsState(
@@ -2578,6 +2605,174 @@ fun FullScreenStoryViewerDialog(
                     )
                 }
 
+                // Animated confirmation banner when an emoji reaction is sent
+                if (lastSentEmojiFeedback != null) {
+                    Surface(
+                        color = LuminaCoral.copy(alpha = 0.92f),
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier.testTag("story_reaction_feedback_badge")
+                    ) {
+                        Text(
+                            text = lastSentEmojiFeedback!!,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color.White,
+                            fontWeight = FontWeight.ExtraBold,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                        )
+                    }
+                }
+
+                // Interactive Emoji Reaction Bar + Quick Story Reply Input
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = Color.White.copy(alpha = 0.14f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, Color.White.copy(alpha = 0.28f), RoundedCornerShape(18.dp))
+                        .testTag("story_emoji_reaction_bar")
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (mySelectedStoryEmoji != null) {
+                                    "Your feeling: $mySelectedStoryEmoji ${storyFeelingLabelForEmoji(mySelectedStoryEmoji)} • Tap to update"
+                                } else if (currentStory.authorId == currentUserId) {
+                                    "Tap an emoji to express your feeling on this story"
+                                } else {
+                                    "Tap an emoji to express your feeling to @${currentStory.authorUsername}"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White.copy(alpha = 0.9f),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            if (parsedStoryReactions.isNotEmpty()) {
+                                val topSummary = emojiReactionCounts.entries
+                                    .take(4)
+                                    .joinToString(" ") { "${it.key}${it.value}" }
+                                Text(
+                                    text = "$topSummary • ${parsedStoryReactions.size}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = LuminaAmber,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    modifier = Modifier
+                                        .clickable { showViewersSheet = true }
+                                        .testTag("story_reactions_count_pill")
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            storyFeelingOptions.forEach { (emoji, feelingLabel) ->
+                                val isSelectedByMe = mySelectedStoryEmoji == emoji
+                                val countForEmoji = emojiReactionCounts[emoji] ?: 0
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .clickable {
+                                            val note = storyReplyNote.trim()
+                                            onReactToStory(currentStory, emoji, note)
+                                            lastSentEmojiFeedback = if (note.isNotBlank()) {
+                                                "Saved $emoji ($feelingLabel) & reply to Story #${currentStory.id.take(6)}!"
+                                            } else {
+                                                "Reacted $emoji ($feelingLabel) to @${currentStory.authorUsername}'s story!"
+                                            }
+                                            storyReplyNote = ""
+                                        }
+                                        .padding(horizontal = 2.dp, vertical = 2.dp)
+                                        .testTag("story_emoji_btn_$emoji")
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = if (isSelectedByMe) {
+                                            LuminaCoral.copy(alpha = 0.85f)
+                                        } else {
+                                            Color.White.copy(alpha = 0.18f)
+                                        },
+                                        modifier = Modifier
+                                            .size(34.dp)
+                                            .then(
+                                                if (isSelectedByMe) {
+                                                    Modifier.border(1.5.dp, Color.White, CircleShape)
+                                                } else {
+                                                    Modifier
+                                                }
+                                            )
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Text(
+                                                text = emoji,
+                                                fontSize = 17.sp
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        text = if (countForEmoji > 0) "$feelingLabel ($countForEmoji)" else feelingLabel,
+                                        fontSize = 9.sp,
+                                        color = if (isSelectedByMe) LuminaAmber else Color.White.copy(alpha = 0.78f),
+                                        fontWeight = if (isSelectedByMe) FontWeight.ExtraBold else FontWeight.Medium,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+
+                        if (currentStory.authorId != currentUserId) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = storyReplyNote,
+                                    onValueChange = { storyReplyNote = it.take(140) },
+                                    placeholder = {
+                                        Text(
+                                            text = "Add a note with your reaction...",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = Color.White.copy(alpha = 0.65f)
+                                        )
+                                    },
+                                    singleLine = true,
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("story_reaction_reply_input")
+                                )
+                                Button(
+                                    onClick = {
+                                        val note = storyReplyNote.trim()
+                                        onReactToStory(currentStory, "❤️", note)
+                                        lastSentEmojiFeedback = if (note.isNotBlank()) {
+                                            "Sent ❤️ & \"$note\" to @${currentStory.authorUsername}!"
+                                        } else {
+                                            "Sent ❤️ reaction to @${currentStory.authorUsername}!"
+                                        }
+                                        storyReplyNote = ""
+                                    },
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier.testTag("story_reaction_reply_send")
+                                ) {
+                                    Text("Send", fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Bottom-Left Corner Swipe Zone & Pill to open Story Viewers Board + Highlight Action
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -2604,7 +2799,8 @@ fun FullScreenStoryViewerDialog(
                                 modifier = Modifier.size(16.dp)
                             )
                             Text(
-                                text = "Seen by ${currentStory.viewerIds.size} • Swipe bottom-left",
+                                text = "Seen by ${currentStory.viewerIds.size}" +
+                                    if (parsedStoryReactions.isNotEmpty()) " • ${parsedStoryReactions.size} reactions" else " • Swipe bottom-left",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = Color.White,
                                 fontWeight = FontWeight.Bold
@@ -2707,6 +2903,14 @@ fun FullScreenStoryViewerDialog(
                     ) {
                         items(currentStory.viewerIds, key = { it }) { viewerUid ->
                             val viewerProfile = discoverableUsers.find { it.userId == viewerUid }
+                            val viewerEmojis = parsedStoryReactions
+                                .filter { it.userId == viewerUid }
+                                .map { it.emoji }
+                                .distinct()
+                            val fallbackUsername = parsedStoryReactions
+                                .firstOrNull { it.userId == viewerUid }
+                                ?.username
+                                .orEmpty()
                             LuminaGlassCard(
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(14.dp)
@@ -2721,30 +2925,51 @@ fun FullScreenStoryViewerDialog(
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         UserAvatarBadge(
                                             avatarUrl = viewerProfile?.avatarUrl ?: "",
-                                            displayName = viewerProfile?.displayName ?: "Mitr User",
+                                            displayName = viewerProfile?.displayName ?: fallbackUsername.ifBlank { "Mitr User" },
                                             size = 40.dp,
                                             showBorder = true
                                         )
                                         Spacer(modifier = Modifier.width(10.dp))
                                         Column {
                                             Text(
-                                                text = viewerProfile?.displayName ?: "Mitr Member",
+                                                text = viewerProfile?.displayName ?: fallbackUsername.ifBlank { "Mitr User" },
                                                 style = MaterialTheme.typography.titleSmall,
                                                 fontWeight = FontWeight.Bold
                                             )
                                             Text(
-                                                text = if (viewerProfile != null) "@${viewerProfile.username}" else "UID: ${viewerUid.take(10)}",
+                                                text = when {
+                                                    viewerProfile != null -> "@${viewerProfile.username}"
+                                                    fallbackUsername.isNotBlank() -> "@$fallbackUsername"
+                                                    else -> "UID: ${viewerUid.take(10)}"
+                                                },
                                                 style = MaterialTheme.typography.bodySmall,
                                                 color = MaterialTheme.colorScheme.primary
                                             )
                                         }
                                     }
-                                    Icon(
-                                        imageVector = Icons.Default.Visibility,
-                                        contentDescription = "Viewed",
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(18.dp)
-                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        if (viewerEmojis.isNotEmpty()) {
+                                            Surface(
+                                                shape = RoundedCornerShape(50),
+                                                color = MaterialTheme.colorScheme.primaryContainer
+                                            ) {
+                                                Text(
+                                                    text = viewerEmojis.joinToString(" "),
+                                                    fontSize = 15.sp,
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                                )
+                                            }
+                                        }
+                                        Icon(
+                                            imageVector = Icons.Default.Visibility,
+                                            contentDescription = "Viewed",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
                                 }
                             }
                         }

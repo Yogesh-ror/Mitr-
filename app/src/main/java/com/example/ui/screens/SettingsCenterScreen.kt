@@ -83,6 +83,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.example.data.local.MobileStorageStats
 import com.example.data.model.UserActivityLog
 import com.example.data.model.UserProfile
 import com.example.data.model.UserRelation
@@ -135,6 +136,8 @@ fun SettingsCenterScreen(
     onSignOutCurrent: () -> Unit,
     onSignOutAll: () -> Unit,
     onDeleteAccountPermanent: () -> Unit,
+    mobileStorageStats: MobileStorageStats = MobileStorageStats(),
+    onOffloadChatsToMobileStorage: () -> Unit = {},
     onBack: () -> Unit
 ) {
     var currentPage by remember { mutableStateOf(SettingsPage.HOME) }
@@ -884,6 +887,35 @@ fun SettingsCenterScreen(
                             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
                             SettingsSwitchTile("Activity Status", "Show real-time active status in chat", settings.showActivityStatus) {
                                 onSaveSettings(settings.copy(showActivityStatus = it))
+                            }
+                        }
+
+                        SettingsCategoryGroupCard(categoryTitle = "Mobile Storage & Cloud Database Offload") {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "Store Chats & Activity Logs on Phone Storage",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Chat history (${mobileStorageStats.localMessagesCount} messages in ${mobileStorageStats.localConversationsCount} threads) and activity logs (${mobileStorageStats.localActivityLogsCount} items) are stored on your phone's local SQLite storage (~${(mobileStorageStats.estimatedSavedCloudBytes / 1024L).coerceAtLeast(1L)} KB saved) to prevent the cloud database from filling up.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Button(
+                                    onClick = onOffloadChatsToMobileStorage,
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("settings_offload_chats_button")
+                                ) {
+                                    Text("Offload Chat History to Phone & Free Cloud DB", fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }

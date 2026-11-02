@@ -1,12 +1,18 @@
 package com.example
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -66,10 +72,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.example.data.local.MitrLocalDatabase
 import com.example.data.model.UiState
 import com.example.data.model.UserProfile
 import com.example.data.model.isFounderVipAccount
 import com.example.data.repository.SocialRepository
+import com.example.notifications.MitrPushNotificationHelper
 import com.example.ui.components.MitrIcons
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.CreateContentScreen
@@ -153,11 +161,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         configureAppCheck(this, intent)
-        try {
-            com.google.android.gms.ads.MobileAds.initialize(this) {}
-        } catch (e: Exception) {
-            Log.e(TAG, "AdMob init skipped or failed", e)
-        }
         enableEdgeToEdge()
         setContent {
             LuminaAppRoot()
@@ -248,9 +251,10 @@ fun AuthenticatedLuminaShell(
                 }
                 val databaseId = app.getString(R.string.firestore_database_id)
                 val db = FirebaseFirestore.getInstance(databaseId)
+                val localDao = MitrLocalDatabase.getInstance(app).mitrLocalDao()
                 val prefs = app.getSharedPreferences("lumina_accounts_prefs", Context.MODE_PRIVATE)
                 SocialViewModel(
-                    repository = SocialRepository(db),
+                    repository = SocialRepository(db = db, localDao = localDao),
                     currentUserId = currentUserId,
                     prefs = prefs
                 )
@@ -263,6 +267,7 @@ fun AuthenticatedLuminaShell(
     val feedPostsState by viewModel.feedPostsState.collectAsStateWithLifecycle()
     val activeStories by viewModel.activeStoriesState.collectAsStateWithLifecycle()
     val allAccessibleStories by viewModel.allAccessibleStoriesState.collectAsStateWithLifecycle()
+    val storyArchive by viewModel.storyArchiveState.collectAsStateWithLifecycle()
     val savedPosts by viewModel.savedPostsState.collectAsStateWithLifecycle()
     val reelsState by viewModel.reelsState.collectAsStateWithLifecycle()
     val conversations by viewModel.conversationsState.collectAsStateWithLifecycle()
@@ -280,8 +285,14 @@ fun AuthenticatedLuminaShell(
     val sessionMinutes by viewModel.sessionMinutes.collectAsStateWithLifecycle()
     val notifications by viewModel.notificationsState.collectAsStateWithLifecycle()
     val latestFirestoreNotificationEvent by viewModel.latestFirestoreNotificationEvent.collectAsStateWithLifecycle()
+    val latestIncomingDirectMessageEvent by viewModel.latestIncomingDirectMessageEvent.collectAsStateWithLifecycle()
+    val mobileStorageStats by viewModel.mobileStorageStatsState.collectAsStateWithLifecycle()
     val feedSearchResult by viewModel.feedSearchResultState.collectAsStateWithLifecycle()
     val inspectedUserProfile by viewModel.inspectedUserProfileState.collectAsStateWithLifecycle()
+    val inspectedUserPosts by viewModel.inspectedUserPostsState.collectAsStateWithLifecycle()
+    val inspectedUserReels by viewModel.inspectedUserReelsState.collectAsStateWithLifecycle()
+    val ownPosts by viewModel.ownPostsState.collectAsStateWithLifecycle()
+    val ownReels by viewModel.ownReelsState.collectAsStateWithLifecycle()
 
     var currentTab by rememberSaveable { mutableStateOf(MainNavDestination.HOME) }
     var showCreateScreenTab by rememberSaveable { mutableStateOf<Int?>(null) }
@@ -289,8 +300,26 @@ fun AuthenticatedLuminaShell(
     var showNotificationsSheet by rememberSaveable { mutableStateOf(false) }
     var inspectedUserId by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingOpenConversationId by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingOpenReelId by rememberSaveable { mutableStateOf<String?>(null) }
 
     val snackbarHostState = remember { SnackbarHostState() }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ ->
+        MitrPushNotificationHelper.refreshAndSyncFcmToken(context)
+    }
+
+    // Initialize FCM token registration & request POST_NOTIFICATIONS permission on Android 13+
+    LaunchedEffect(currentUserId) {
+        MitrPushNotificationHelper.ensureNotificationChannels(context)
+        MitrPushNotificationHelper.refreshAndSyncFcmToken(context)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
 
     // Immediately stop any active song whenever switching tabs or opening sub-screens
     LaunchedEffect(currentTab, showCreateScreenTab, showSettingsCenter, inspectedUserId) {
@@ -302,12 +331,37 @@ fun AuthenticatedLuminaShell(
         viewModel.loadInspectedUserProfile(inspectedUserId)
     }
 
+    // Trigger real-time FCM / High-Importance Direct Message push notification when a user receives a new direct message
+    LaunchedEffect(latestIncomingDirectMessageEvent) {
+        val incomingConv = latestIncomingDirectMessageEvent
+        if (incomingConv != null) {
+            if (settings.pushNotificationsEnabled && settings.notifyDirectMessages) {
+                val senderUid = incomingConv.lastSenderId
+                val senderProfile = discoverUsers.find { it.userId == senderUid }
+                val senderUsername = senderProfile?.username
+                    ?: incomingConv.participantUsernames.firstOrNull {
+                        !it.equals((profileState as? UiState.Success)?.data?.username.orEmpty(), ignoreCase = true)
+                    }.orEmpty().ifBlank { "mitr_user" }
+                val messageIdKey = "${incomingConv.id}_${incomingConv.updatedAt?.seconds ?: System.currentTimeMillis()}"
+                MitrPushNotificationHelper.showDirectMessageNotification(
+                    context = context,
+                    conversationId = incomingConv.id,
+                    messageId = messageIdKey,
+                    senderUsername = senderUsername,
+                    messageText = incomingConv.lastMessageText
+                )
+            }
+            viewModel.consumeLatestIncomingDirectMessageEvent()
+        }
+    }
+
     // Trigger local notification via WorkManager whenever a new document is added to the user's Firestore notifications collection
     LaunchedEffect(latestFirestoreNotificationEvent) {
         val notif = latestFirestoreNotificationEvent
         if (notif != null) {
             val title = when (notif.type.uppercase()) {
                 "LIKE" -> "New Like on Mitr"
+                "STORY_REACTION" -> "Story Reaction on Mitr"
                 "COMMENT" -> "New Comment on Mitr"
                 "FOLLOW" -> "New Follower on Mitr"
                 "COLLAB" -> "New Collaboration on Mitr"
@@ -495,7 +549,7 @@ fun AuthenticatedLuminaShell(
                                                 }
                                             )
                                         },
-                                        onPublishReel = { videoUrl, caption, audioName, durationSec, musicTrack, collabUsers, taggedUsers ->
+                                        onPublishReel = { videoUrl, caption, audioName, durationSec, musicTrack, collabUsers, taggedUsers, trimStartMs, trimEndMs ->
                                             viewModel.publishReel(
                                                 videoUrl = videoUrl,
                                                 caption = caption,
@@ -504,6 +558,8 @@ fun AuthenticatedLuminaShell(
                                                 musicTrack = musicTrack,
                                                 collaboratorUsernames = collabUsers,
                                                 taggedUsernames = taggedUsers,
+                                                videoTrimStartMs = trimStartMs,
+                                                videoTrimEndMs = trimEndMs,
                                                 onComplete = {
                                                     stopAllGlobalAudio()
                                                     showCreateScreenTab = null
@@ -556,13 +612,23 @@ fun AuthenticatedLuminaShell(
                                                 signOut(context, credentialManager, {}, coroutineScope)
                                             }
                                         },
+                                        mobileStorageStats = mobileStorageStats,
+                                        onOffloadChatsToMobileStorage = {
+                                            viewModel.offloadChatsToMobileStorage()
+                                        },
                                         onBack = { showSettingsCenter = false }
                                     )
                                 }
 
                                 inspectedUserId != null && inspectedUserId != currentUserId -> {
-                                    val allPosts = (feedPostsState as? UiState.Success)?.data ?: emptyList()
-                                    val allReels = (reelsState as? UiState.Success)?.data ?: emptyList()
+                                    val feedPosts = (feedPostsState as? UiState.Success)?.data ?: emptyList()
+                                    val allPosts = remember(inspectedUserPosts, feedPosts) {
+                                        (inspectedUserPosts + feedPosts).distinctBy { it.id }
+                                    }
+                                    val publicReels = (reelsState as? UiState.Success)?.data ?: emptyList()
+                                    val allReels = remember(inspectedUserReels, publicReels) {
+                                        (inspectedUserReels + publicReels).distinctBy { it.id }
+                                    }
                                     val cleanTarget = inspectedUserId!!.trim().removePrefix("@")
 
                                     val targetUser = remember(
@@ -737,7 +803,23 @@ fun AuthenticatedLuminaShell(
                                             viewModel.sharePostToUser(recipient, post)
                                         },
                                         onLikeReel = { viewModel.toggleLikeReel(it) },
+                                        onSaveReel = { viewModel.toggleSaveReel(it) },
+                                        onDeleteReel = { viewModel.deleteReel(it) },
+                                        onOpenReelInFeed = { reel ->
+                                            stopAllGlobalAudio()
+                                            pendingOpenReelId = reel.id
+                                            inspectedUserId = null
+                                            currentTab = MainNavDestination.REELS
+                                        },
+                                        onCreateReel = {
+                                            stopAllGlobalAudio()
+                                            inspectedUserId = null
+                                            showCreateScreenTab = 2
+                                        },
                                         onRecordStoryView = { viewModel.recordStoryView(it) },
+                                        onReactToStory = { story, emoji, note ->
+                                            viewModel.reactToStory(story, emoji, note)
+                                        },
                                         onDeleteStory = { viewModel.deleteStory(it) },
                                         onToggleHighlightStory = { story, title ->
                                             viewModel.toggleStoryHighlight(story, title)
@@ -891,6 +973,9 @@ fun AuthenticatedLuminaShell(
                                                     viewModel.addComment(targetId, targetType, text, parentId)
                                                 },
                                                 onRecordStoryView = { viewModel.recordStoryView(it) },
+                                                onReactToStory = { story, emoji, note ->
+                                                    viewModel.reactToStory(story, emoji, note)
+                                                },
                                                 onDeleteStory = { viewModel.deleteStory(it) },
                                                 onToggleHighlightStory = { story, title ->
                                                     viewModel.toggleStoryHighlight(story, title)
@@ -910,15 +995,13 @@ fun AuthenticatedLuminaShell(
                                                     outgoingFollows.filter { it.status == "ACCEPTED" }.map { it.followingId }
                                                 },
                                                 autoplayVideos = settings.autoplayVideos,
+                                                initialReelId = pendingOpenReelId,
+                                                onConsumeInitialReel = {
+                                                    pendingOpenReelId = null
+                                                },
                                                 onLikeReel = { viewModel.toggleLikeReel(it) },
                                                 onSaveReel = { reel ->
-                                                    viewModel.toggleSavePost(
-                                                        postId = reel.id,
-                                                        targetType = "REEL",
-                                                        authorUsername = reel.authorUsername,
-                                                        captionPreview = reel.caption,
-                                                        mediaUrl = reel.videoUrl
-                                                    )
+                                                    viewModel.toggleSaveReel(reel)
                                                 },
                                                 onToggleSaveMusic = { track ->
                                                     viewModel.toggleSaveMusic(track)
@@ -1001,6 +1084,10 @@ fun AuthenticatedLuminaShell(
                                                 onReportConversation = { convId, reason ->
                                                     viewModel.submitReport(convId, "MESSAGE", reason)
                                                 },
+                                                mobileStorageStats = mobileStorageStats,
+                                                onOffloadChatsToMobileStorage = {
+                                                    viewModel.offloadChatsToMobileStorage()
+                                                },
                                                 onOpenSearch = { currentTab = MainNavDestination.SEARCH },
                                                 onOpenNotifications = { showNotificationsSheet = true },
                                                 onOpenUserProfile = { uid ->
@@ -1045,8 +1132,14 @@ fun AuthenticatedLuminaShell(
                                         }
 
                                         MainNavDestination.PROFILE -> {
-                                            val allPosts = (feedPostsState as? UiState.Success)?.data ?: emptyList()
-                                            val allReels = (reelsState as? UiState.Success)?.data ?: emptyList()
+                                            val feedPosts = (feedPostsState as? UiState.Success)?.data ?: emptyList()
+                                            val allPosts = remember(ownPosts, feedPosts) {
+                                                (ownPosts + feedPosts).distinctBy { it.id }
+                                            }
+                                            val publicReels = (reelsState as? UiState.Success)?.data ?: emptyList()
+                                            val allReels = remember(ownReels, publicReels) {
+                                                (ownReels + publicReels).distinctBy { it.id }
+                                            }
                                             ProfileScreen(
                                                 currentUserId = currentUserId,
                                                 viewedProfile = currentProfile,
@@ -1097,7 +1190,22 @@ fun AuthenticatedLuminaShell(
                                                     viewModel.sharePostToUser(recipient, post)
                                                 },
                                                 onLikeReel = { viewModel.toggleLikeReel(it) },
+                                                onSaveReel = { viewModel.toggleSaveReel(it) },
+                                                onDeleteReel = { viewModel.deleteReel(it) },
+                                                onOpenReelInFeed = { reel ->
+                                                    stopAllGlobalAudio()
+                                                    pendingOpenReelId = reel.id
+                                                    currentTab = MainNavDestination.REELS
+                                                },
+                                                onCreateReel = {
+                                                    stopAllGlobalAudio()
+                                                    showCreateScreenTab = 2
+                                                },
+                                                archivedStories = storyArchive,
                                                 onRecordStoryView = { viewModel.recordStoryView(it) },
+                                                onReactToStory = { story, emoji, note ->
+                                                    viewModel.reactToStory(story, emoji, note)
+                                                },
                                                 onDeleteStory = { viewModel.deleteStory(it) },
                                                 onToggleHighlightStory = { story, title ->
                                                     viewModel.toggleStoryHighlight(story, title)
